@@ -1,0 +1,34 @@
+name: vehicle_tax_collector
+description: Vehicle Tax Collector Flutter App
+publish_to: 'none'
+
+environment:
+  sdk: ">=2.18.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  http: ^0.13.6
+  shared_preferences: ^2.2.2
+  intl: ^0.19.0
+  pdf: ^3.11.1
+  printing: ^5.13.4
+  unified_esc_pos_printer: ^3.3.2
+  permission_handler: ^12.0.3
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+  flutter_launcher_icons: ^0.13.1
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/images/Logo.jpeg"
+
+flutter:
+  uses-material-design: true
+
+  assets:
+    - assets/images/Logo.jpeg
