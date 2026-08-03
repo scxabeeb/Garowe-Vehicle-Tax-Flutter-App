@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
@@ -7,9 +8,12 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../services/api_service.dart';
 import '../services/session.dart';
-import '../utils/payment_recording_parser.dart';
 import '../utils/receipt_id_formatter.dart';
+import '../widgets/app_bottom_nav.dart';
+import 'dashboard_page.dart';
 import 'invoice_preview_page.dart';
+import 'printer_settings_page.dart';
+import 'profile_page.dart';
 
 class PaymentPage extends StatefulWidget {
   const PaymentPage({super.key});
@@ -20,6 +24,7 @@ class PaymentPage extends StatefulWidget {
 
 class _PaymentPageState extends State<PaymentPage> {
   static const Duration _eatOffset = Duration(hours: 3);
+  static const Duration _refreshInterval = Duration(seconds: 5);
 
   final plateCtrl = TextEditingController();
   final ownerCtrl = TextEditingController();
@@ -53,6 +58,8 @@ class _PaymentPageState extends State<PaymentPage> {
 
   bool get isAdmin => (Session.role ?? '').toLowerCase() == 'admin';
 
+  Timer? _refreshTimer;
+
   DateTime _toEat(DateTime input) => input.toUtc().add(_eatOffset);
 
   String _formatEatTime(DateTime input) =>
@@ -64,12 +71,28 @@ class _PaymentPageState extends State<PaymentPage> {
   }
 
   @override
+  void initState() {
+    super.initState();
+    _startAutoRefresh();
+  }
+
+  @override
   void dispose() {
+    _refreshTimer?.cancel();
     plateCtrl.dispose();
     ownerCtrl.dispose();
     mobileCtrl.dispose();
     qtyCtrl.dispose();
     super.dispose();
+  }
+
+  void _startAutoRefresh() {
+    _refreshTimer?.cancel();
+    _refreshTimer = Timer.periodic(_refreshInterval, (_) {
+      if (!mounted || !invoiceGenerated) return;
+      if (ReceiptIdFormatter.trimValue(previewPaymentId ?? '').isEmpty) return;
+      unawaited(_refreshGeneratedInvoiceStatus());
+    });
   }
 
   Future<String?> _getAccessToken() async {
@@ -139,8 +162,59 @@ class _PaymentPageState extends State<PaymentPage> {
     return fallback;
   }
 
-  Map<String, dynamic>? _extractReceiptPayload(Map<String, dynamic> source) {
-    return PaymentRecordingParser.extractReceiptPayload(source);
+  Map<String, dynamic>? _extractReceiptPayload(dynamic payload) {
+    if (payload is! Map<String, dynamic>) return null;
+
+    final receipt = payload['receipt'];
+    if (receipt is Map<String, dynamic>) return receipt;
+
+    final data = payload['data'];
+    if (data is Map<String, dynamic>) return data;
+
+    final result = payload['result'];
+    if (result is Map<String, dynamic>) return result;
+
+    return payload;
+  }
+
+  bool _asBool(dynamic value) {
+    if (value is bool) return value;
+    if (value is num) return value != 0;
+    if (value is String) {
+      final normalized = value.trim().toLowerCase();
+      return normalized == 'true' ||
+          normalized == '1' ||
+          normalized == 'paid' ||
+          normalized == 'success';
+    }
+    return false;
+  }
+
+  bool _isPaidFromPayload(Map<String, dynamic> payload) {
+    final status = _readScalarString(
+      payload,
+      ['status', 'paymentStatus', 'state'],
+      fallback: '',
+    ).toLowerCase();
+
+    if (status == 'paid' || status == 'completed') {
+      return true;
+    }
+
+    if (_asBool(payload['isPaid']) || _asBool(payload['paid'])) {
+      return true;
+    }
+
+    final paidAtText = _readScalarString(payload, ['paidAt', 'paidAtUtc']);
+    if (paidAtText.isNotEmpty) {
+      return true;
+    }
+
+    return false;
+  }
+
+  Map<String, dynamic> _paymentPayloadOnly(Map<String, dynamic> payload) {
+    return _extractReceiptPayload(payload) ?? payload;
   }
 
   Future<Map<String, dynamic>?> _loadBackendReceipt(String paymentId) async {
@@ -158,7 +232,7 @@ class _PaymentPageState extends State<PaymentPage> {
       return null;
     }
 
-    return _extractReceiptPayload(response);
+    return response;
   }
 
   String _extractErrorMessage(
@@ -342,6 +416,7 @@ class _PaymentPageState extends State<PaymentPage> {
       for (final item in list) {
         if (item is! Map<String, dynamic>) continue;
         if (item['isReverted'] == true) continue;
+        if (!_isPaidFromPayload(item)) continue;
 
         final itemPlate = (item['plate'] ?? item['plateNumber'] ?? '')
             .toString()
@@ -455,23 +530,110 @@ class _PaymentPageState extends State<PaymentPage> {
           isPaid: invoicePaid,
           canRecordPayment: isAdmin,
           onRecordPayment: _recordPaymentFromInvoice,
+          onRefreshPaymentStatus: _refreshInvoicePreviewSnapshot,
+          autoPrintWhenPaid: true,
         ),
       ),
     );
+
+    await _refreshGeneratedInvoiceStatus();
+  }
+
+  Future<Map<String, String>?> _refreshInvoicePreviewSnapshot() async {
+    await _refreshGeneratedInvoiceStatus();
+    if (!mounted) return null;
+
+    final invoiceId = ReceiptIdFormatter.trimValue(previewInvoiceNumber ?? '');
+    final paymentId = ReceiptIdFormatter.trimValue(previewPaymentId ?? '');
+    final billNo = ReceiptIdFormatter.trimValue(previewBillNo ?? '');
+    final shortCode = ReceiptIdFormatter.resolveShortCode(
+      paymentId,
+      provided: previewShortCode,
+    );
+
+    if (invoiceId.isEmpty && paymentId.isEmpty && billNo.isEmpty && shortCode.isEmpty) {
+      return null;
+    }
+
+    return {
+      'invoiceNumber': invoiceId,
+      'paymentId': paymentId,
+      'billNo': billNo,
+      'refId': billNo,
+      'shortCode': shortCode,
+      'isPaid': invoicePaid ? 'true' : 'false',
+    };
+  }
+
+  Future<void> _refreshGeneratedInvoiceStatus() async {
+    final existingPaymentId = ReceiptIdFormatter.trimValue(previewPaymentId ?? '');
+    if (existingPaymentId.isEmpty) {
+      return;
+    }
+
+    final latest = await _loadBackendReceipt(existingPaymentId);
+    if (latest == null || !mounted) {
+      return;
+    }
+
+    final payload = _paymentPayloadOnly(latest);
+    final invoiceId = _readScalarString(payload, ['invoiceId', 'invoiceNumber']);
+    final paymentId = _readScalarString(payload, ['paymentId', 'id']);
+    final refNo = _readScalarString(
+      payload,
+      [
+        'receiptId',
+        'receiptNumber',
+        'golisBillNo',
+        'transactionId',
+        'billNo',
+        'billNumber',
+        'referenceNumber',
+        'refNo',
+        'refId',
+      ],
+    );
+    final shortCode = _readScalarString(payload, ['shortCode']);
+    final paidStatus = refNo.isNotEmpty && _isPaidFromPayload(payload);
+
+    setState(() {
+      if (invoiceId.isNotEmpty) {
+        previewInvoiceNumber = invoiceId;
+      }
+      if (paymentId.isNotEmpty) {
+        previewPaymentId = paymentId;
+      }
+      final normalizedInvoice = invoiceId.trim().toLowerCase();
+      final normalizedRef = refNo.trim().toLowerCase();
+      if (refNo.isNotEmpty && normalizedRef != normalizedInvoice) {
+        previewBillNo = refNo;
+      }
+      final effectivePaymentId =
+          paymentId.isNotEmpty ? paymentId : (previewPaymentId ?? '');
+      previewShortCode =
+          ReceiptIdFormatter.resolveShortCode(effectivePaymentId, provided: shortCode);
+      invoicePaid = invoicePaid || paidStatus;
+      paidToday = paidToday || invoicePaid;
+      if (invoicePaid && paidTodayTime == null) {
+        paidTodayTime = _formatEatTime(DateTime.now());
+      }
+    });
   }
 
   Future<void> _generateInvoicePreview() async {
     if (invoiceGenerated) {
-      if (!invoicePaid &&
-          previewInvoiceNumber != null &&
+      if (previewInvoiceNumber != null &&
           previewBillNo != null &&
           previewPaymentId != null &&
           previewShortCode != null) {
+        await _refreshGeneratedInvoiceStatus();
+        if (!mounted) return;
         await _openReceiptPreview(
-          receiptNumber: previewInvoiceNumber!,
-          billNo: previewBillNo!,
-          paymentId: previewPaymentId!,
-          shortCode: previewShortCode!,
+          receiptNumber: previewInvoiceNumber ?? '',
+          billNo: previewBillNo ?? '',
+          paymentId: previewPaymentId ?? '',
+          shortCode: previewShortCode ??
+              ReceiptIdFormatter.buildPaymentShortCode(previewPaymentId ?? ''),
         );
         return;
       }
@@ -493,11 +655,76 @@ class _PaymentPageState extends State<PaymentPage> {
 
     calcTotal();
 
+    final token = await _getAccessToken();
+    if (token == null || token.isEmpty) {
+      showMsg('Login required');
+      return;
+    }
+
+    final vehicleId = _toInt(vehicle!['id'] ?? vehicle!['vehicleId']);
+    if (vehicleId == null) {
+      showMsg('Vehicle not found');
+      return;
+    }
+
+    final prefs = await SharedPreferences.getInstance();
+    final collectorId = Session.userId ?? prefs.getInt('userId');
+    final collectorUsername =
+        (Session.username ?? prefs.getString('username') ?? '').trim();
+
+    final previewResponse = await ApiService.createPaymentPreview(
+      {
+        'vehicleId': vehicleId,
+        'movementId': selectedMovementId,
+        'quantity': int.tryParse(qtyCtrl.text.trim()) ?? 1,
+        'collectorId': collectorId,
+        'userId': collectorId,
+        'collectorUsername': collectorUsername,
+        'collectorName': collectorUsername,
+        'username': collectorUsername,
+      },
+      accessToken: token,
+    );
+
+    final receipt = _extractReceiptPayload(previewResponse ?? {}) ?? <String, dynamic>{};
+    final previewInvoice = _readScalarString(
+      receipt,
+      ['invoiceId', 'invoiceNumber', 'invoiceNo', 'invoice_no'],
+      fallback: '',
+    );
+    final previewPayment = _readScalarString(
+      receipt,
+      ['paymentId', 'paymentID', 'id'],
+      fallback: '',
+    );
+    final previewBill = _readScalarString(
+      receipt,
+      [
+        'golisBillNo',
+        'transactionId',
+        'billNo',
+        'billNumber',
+        'referenceNumber',
+        'refNo',
+        'refId',
+      ],
+      fallback: '',
+    );
+    final previewShort = _readScalarString(receipt, ['shortCode'], fallback: '');
+
+    if (previewInvoice.isEmpty || previewPayment.isEmpty) {
+      showMsg('Failed to generate preview from server');
+      return;
+    }
+
     setState(() {
-      previewInvoiceNumber = '';
-      previewBillNo = '';
-      previewPaymentId = '';
-      previewShortCode = '';
+      previewInvoiceNumber = previewInvoice;
+      previewBillNo = previewBill;
+      previewPaymentId = previewPayment;
+      previewShortCode = ReceiptIdFormatter.resolveShortCode(
+        previewPayment,
+        provided: previewShort,
+      );
       invoiceGenerated = true;
       invoicePaid = false;
     });
@@ -505,10 +732,11 @@ class _PaymentPageState extends State<PaymentPage> {
     if (!mounted) return;
 
     await _openReceiptPreview(
-      receiptNumber: '',
-      billNo: '',
-      paymentId: '',
-      shortCode: '',
+      receiptNumber: previewInvoice,
+      billNo: previewBill,
+      paymentId: previewPayment,
+      shortCode:
+          previewShortCode ?? ReceiptIdFormatter.buildPaymentShortCode(previewPayment),
     );
   }
 
@@ -789,6 +1017,17 @@ class _PaymentPageState extends State<PaymentPage> {
       'username': collectorUsername,
     };
 
+    final invoiceNumber = ReceiptIdFormatter.trimValue(previewInvoiceNumber ?? '');
+    if (invoiceNumber.isNotEmpty) {
+      payload['invoiceId'] = invoiceNumber;
+      payload['invoiceNumber'] = invoiceNumber;
+    }
+
+    final generatedPaymentId = _toInt(previewPaymentId);
+    if (generatedPaymentId != null) {
+      payload['paymentId'] = generatedPaymentId;
+    }
+
     final referenceNumber = ReceiptIdFormatter.trimValue(previewBillNo ?? '');
     if (referenceNumber.isNotEmpty) {
       payload['referenceNumber'] = referenceNumber;
@@ -796,7 +1035,13 @@ class _PaymentPageState extends State<PaymentPage> {
       payload['billNumber'] = referenceNumber;
     }
 
-    final result = await ApiService.pay(payload, accessToken: token);
+    final result = generatedPaymentId != null
+        ? await ApiService.collectGeneratedInvoice(
+            generatedPaymentId,
+            payload,
+            accessToken: token,
+          )
+        : await ApiService.pay(payload, accessToken: token);
 
     setState(() => loading = false);
 
@@ -807,48 +1052,79 @@ class _PaymentPageState extends State<PaymentPage> {
     final result = await _submitPaymentRequest();
 
     if (result is Map<String, dynamic> && result['success'] == true) {
+      final existingInvoiceId = ReceiptIdFormatter.trimValue(previewInvoiceNumber ?? '');
+      final existingPaymentId = ReceiptIdFormatter.trimValue(previewPaymentId ?? '');
+      final existingBillNo = ReceiptIdFormatter.trimValue(previewBillNo ?? '');
+      final existingShortCode = ReceiptIdFormatter.trimValue(previewShortCode ?? '');
+
+      final resultPayload = _paymentPayloadOnly(result);
       final paymentIdFromCreate = _readScalarString(
-        result,
-        ['paymentId'],
+        resultPayload,
+        ['paymentId', 'id'],
       );
       final receipt = paymentIdFromCreate.isEmpty
           ? null
           : await _loadBackendReceipt(paymentIdFromCreate);
-      final source = receipt ?? result;
-      final parsedRecord = PaymentRecordingParser.parse(
-        source,
-        fallbackInvoice: previewInvoiceNumber ?? '',
-        fallbackPayment: paymentIdFromCreate.isEmpty
-            ? (previewPaymentId ?? '')
-            : paymentIdFromCreate,
-        fallbackBillNo: previewBillNo ?? '',
-        fallbackShortCode: ReceiptIdFormatter.buildShortCode(
-          previewInvoiceNumber ?? '',
-        ),
-      );
+      final source = receipt != null ? _paymentPayloadOnly(receipt) : resultPayload;
 
-      final savedInvoiceId = parsedRecord.invoiceNumber;
-      final savedPaymentId = parsedRecord.paymentId;
-      final savedBillNo = parsedRecord.billNo;
-      final savedShortCode = parsedRecord.shortCode;
+      final savedInvoiceId = _readScalarString(
+        source,
+        ['invoiceId', 'invoiceNumber'],
+      );
+      final savedPaymentId = _readScalarString(source, ['paymentId', 'id']);
+      final savedBillNo = _readScalarString(
+        source,
+        [
+          'receiptId',
+          'receiptNumber',
+          'golisBillNo',
+          'transactionId',
+          'billNo',
+          'billNumber',
+          'referenceNumber',
+          'refNo',
+          'refId',
+        ],
+      );
+      final savedShortCode = _readScalarString(source, ['shortCode']);
+
+      final effectiveInvoiceId =
+          savedInvoiceId.isNotEmpty ? savedInvoiceId : existingInvoiceId;
+      final effectivePaymentId =
+          savedPaymentId.isNotEmpty ? savedPaymentId : existingPaymentId;
+      final effectiveBillNo =
+          savedBillNo.isNotEmpty ? savedBillNo : existingBillNo;
+      final preferredShortCode =
+          savedShortCode.isNotEmpty ? savedShortCode : existingShortCode;
+      final effectiveShortCode = ReceiptIdFormatter.resolveShortCode(
+        effectivePaymentId,
+        provided: preferredShortCode,
+      );
+            final paidStatus = result['success'] == true ||
+              (effectiveBillNo.isNotEmpty && _isPaidFromPayload(source));
 
       if (mounted) {
         setState(() {
-          previewInvoiceNumber = savedInvoiceId;
-          previewPaymentId = savedPaymentId;
-          previewBillNo = savedBillNo;
-          previewShortCode = savedShortCode;
-          invoicePaid = true;
-          paidToday = true;
-          paidTodayTime = _formatEatTime(DateTime.now());
+          previewInvoiceNumber = effectiveInvoiceId;
+          previewPaymentId = effectivePaymentId;
+          previewBillNo = effectiveBillNo;
+          previewShortCode = effectiveShortCode;
+          invoicePaid = paidStatus;
+          paidToday = paidStatus;
+          paidTodayTime = paidStatus ? _formatEatTime(DateTime.now()) : null;
         });
       }
-      showMsg('Payment saved', isError: false);
+      showMsg(
+        paidStatus ? 'Payment saved as paid' : 'Payment saved',
+        isError: false,
+      );
       return {
-        'invoiceNumber': savedInvoiceId,
-        'paymentId': savedPaymentId,
-        'billNo': savedBillNo,
-        'shortCode': savedShortCode,
+        'invoiceNumber': effectiveInvoiceId,
+        'paymentId': effectivePaymentId,
+        'billNo': effectiveBillNo,
+        'refId': effectiveBillNo,
+        'shortCode': effectiveShortCode,
+        'isPaid': paidStatus ? 'true' : 'false',
       };
     }
 
@@ -906,7 +1182,12 @@ class _PaymentPageState extends State<PaymentPage> {
 
   Widget _sectionCard({required Widget child}) {
     return Card(
-      elevation: 2,
+      elevation: 0,
+      color: Colors.white,
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(18),
+        side: const BorderSide(color: Color(0xFFE2E8F0)),
+      ),
       child: Padding(
         padding: const EdgeInsets.all(16),
         child: child,
@@ -925,6 +1206,35 @@ class _PaymentPageState extends State<PaymentPage> {
     );
   }
 
+  void _onNavBarTap(int index) {
+    switch (index) {
+      case 0:
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => const DashboardPage()),
+        );
+        break;
+      case 1:
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => const PaymentPage()),
+        );
+        break;
+      case 2:
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => const ProfilePage()),
+        );
+        break;
+      case 3:
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => const PrinterSettingsPage()),
+        );
+        break;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
     final invoiceDisplay = previewInvoiceNumber == null
@@ -936,7 +1246,30 @@ class _PaymentPageState extends State<PaymentPage> {
 
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Collect Vehicle Tax and Generate Receipt'),
+        flexibleSpace: Container(
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              colors: [Color(0xFF0B57D0), Color(0xFF1E40AF)],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+            ),
+          ),
+        ),
+        title: Row(
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(10),
+              child: Image.asset(
+                'assets/images/Logo.jpeg',
+                width: 28,
+                height: 28,
+                fit: BoxFit.cover,
+              ),
+            ),
+            const SizedBox(width: 10),
+            const Text('Collect Vehicle Tax'),
+          ],
+        ),
         actions: [
           if (vehicle != null || showRegister)
             IconButton(
@@ -1187,6 +1520,10 @@ class _PaymentPageState extends State<PaymentPage> {
             ],
           ],
         ),
+      ),
+      bottomNavigationBar: AppBottomNav(
+        currentIndex: 1,
+        onTap: _onNavBarTap,
       ),
     );
   }

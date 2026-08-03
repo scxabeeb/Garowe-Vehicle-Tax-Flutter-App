@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:typed_data';
 
 import 'package:flutter/material.dart';
@@ -9,6 +10,11 @@ import 'package:unified_esc_pos_printer/unified_esc_pos_printer.dart';
 
 import '../services/esc_pos_printer_service.dart';
 import '../utils/receipt_id_formatter.dart';
+import '../widgets/app_bottom_nav.dart';
+import 'dashboard_page.dart';
+import 'payment_page.dart';
+import 'printer_settings_page.dart';
+import 'profile_page.dart';
 
 class InvoicePreviewPage extends StatefulWidget {
   final String invoiceNumber;
@@ -26,6 +32,8 @@ class InvoicePreviewPage extends StatefulWidget {
   final bool isPaid;
   final bool canRecordPayment;
   final Future<Map<String, String>?> Function()? onRecordPayment;
+  final Future<Map<String, String>?> Function()? onRefreshPaymentStatus;
+  final bool autoPrintWhenPaid;
 
   const InvoicePreviewPage({
     super.key,
@@ -44,6 +52,8 @@ class InvoicePreviewPage extends StatefulWidget {
     required this.isPaid,
     required this.canRecordPayment,
     this.onRecordPayment,
+    this.onRefreshPaymentStatus,
+    this.autoPrintWhenPaid = false,
   });
 
   @override
@@ -61,6 +71,8 @@ class _InvoicePreviewPageState extends State<InvoicePreviewPage> {
   late String _shortCode;
   bool _savingPayment = false;
   bool _printingDirect = false;
+  bool _hasAutoPrintedAfterPaid = false;
+  Timer? _refreshTimer;
 
   DateTime _toEat(DateTime input) => input.toUtc().add(_eatOffset);
 
@@ -72,12 +84,65 @@ class _InvoicePreviewPageState extends State<InvoicePreviewPage> {
     _billNo = widget.billNo;
     _paymentId = widget.paymentId;
     _shortCode = widget.shortCode;
+    _hasAutoPrintedAfterPaid = _isPaid;
+    _startAutoRefresh();
+    unawaited(_refreshFromBackendStatus());
   }
 
   @override
   void dispose() {
+    _refreshTimer?.cancel();
     _printerService.dispose();
     super.dispose();
+  }
+
+  void _startAutoRefresh() {
+    _refreshTimer?.cancel();
+    if (widget.onRefreshPaymentStatus == null) {
+      return;
+    }
+
+    _refreshTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      if (!mounted) return;
+      unawaited(_refreshFromBackendStatus());
+    });
+  }
+
+  Future<void> _refreshFromBackendStatus() async {
+    final callback = widget.onRefreshPaymentStatus;
+    if (callback == null) return;
+
+    final result = await callback.call();
+    if (!mounted || result == null) return;
+
+    final nextInvoice = (result['invoiceNumber'] ?? '').trim();
+    final nextPayment = (result['paymentId'] ?? '').trim();
+    final nextBillNo = (result['refId'] ?? result['billNo'] ?? '').trim();
+    final nextShortCode = (result['shortCode'] ?? '').trim();
+    final nextPaid = (result['isPaid'] ?? 'false').toString().toLowerCase() == 'true';
+    final resolvedPaid = _isPaid || nextPaid;
+    final becamePaid = !_isPaid && resolvedPaid;
+
+    setState(() {
+      if (nextInvoice.isNotEmpty) {
+        _invoiceNumber = nextInvoice;
+      }
+      if (nextPayment.isNotEmpty) {
+        _paymentId = nextPayment;
+      }
+      if (nextBillNo.isNotEmpty) {
+        _billNo = nextBillNo;
+      }
+      if (nextShortCode.isNotEmpty) {
+        _shortCode = nextShortCode;
+      }
+      _isPaid = resolvedPaid;
+    });
+
+    if (becamePaid && widget.autoPrintWhenPaid && !_hasAutoPrintedAfterPaid) {
+      _hasAutoPrintedAfterPaid = true;
+      await _printInvoice();
+    }
   }
 
   String _amount(double value) {
@@ -113,8 +178,11 @@ class _InvoicePreviewPageState extends State<InvoicePreviewPage> {
               pw.Divider(),
               pw.SizedBox(height: 10),
               pw.Text('Invoice ID: $invoiceId'),
+              if (_isPaid) pw.Text('Receipt No: $invoiceId'),
               if (ReceiptIdFormatter.hasValue(_billNo))
                 pw.Text('Bill No: ${ReceiptIdFormatter.trimValue(_billNo)}'),
+              if (ReceiptIdFormatter.hasValue(_billNo))
+                pw.Text('Ref ID: ${ReceiptIdFormatter.trimValue(_billNo)}'),
               pw.Text('Payment ID: $paymentId'),
               pw.Text('Status: ${_isPaid ? 'Paid' : 'Not Paid'}'),
               pw.Text('Date: $dateText'),
@@ -153,97 +221,50 @@ class _InvoicePreviewPageState extends State<InvoicePreviewPage> {
 
     setState(() => _printingDirect = true);
     try {
-      final printers = await _printerService.scanSupportedPrinters();
-
-      if (!mounted) return;
-      if (printers.isEmpty) {
+      final scanned = await _printerService.scanSupportedPrinters();
+      if (scanned.isEmpty) {
+        if (!mounted) return;
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text(
-                'No USB/Bluetooth printer found. Turn on and pair/connect printer first.'),
-          ),
+          const SnackBar(content: Text('No printer found. Configure a printer in Printer Settings.')),
         );
         return;
       }
 
-      var selected = await _printerService.resolvePreferredPrinter(printers);
-      if (!mounted) return;
-      if (selected == null) {
-        selected = await _pickPrinter(printers);
-      } else {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text(
-                'Using saved printer: ${_printerService.printerLabel(selected)}'),
-            duration: const Duration(seconds: 2),
-          ),
-        );
-      }
+      final preferred = await _printerService.resolvePreferredPrinter(scanned);
+      final PrinterDevice printer = preferred ?? scanned.first;
 
-      if (!mounted || selected == null) return;
-      await _printerService.savePreferredPrinter(selected);
-
-      await _printerService.printReceipt(
-        printer: selected,
-        data: ReceiptPrintData(
-          invoiceNumber: _invoiceNumber,
-          billNo: _billNo,
-          paymentId: _paymentId,
-          shortCode: _shortCode,
-          plateNumber: widget.plateNumber,
-          ownerName: widget.ownerName,
-          movementName: widget.movementName,
-          quantity: widget.quantity,
-          unitAmount: widget.unitAmount,
-          totalAmount: widget.totalAmount,
-          collectorName: widget.collectorName,
-          paidAt: widget.paidAt,
-          isPaid: _isPaid,
-        ),
+      final data = ReceiptPrintData(
+        invoiceNumber: _invoiceNumber,
+        billNo: _billNo,
+        paymentId: _paymentId,
+        shortCode: _shortCode,
+        plateNumber: widget.plateNumber,
+        ownerName: widget.ownerName,
+        movementName: widget.movementName,
+        quantity: widget.quantity,
+        unitAmount: widget.unitAmount,
+        totalAmount: widget.totalAmount,
+        collectorName: widget.collectorName,
+        paidAt: widget.paidAt,
+        isPaid: _isPaid,
       );
+
+      await _printerService.printReceipt(printer: printer, data: data);
 
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Printed successfully.')),
+        SnackBar(content: Text('Receipt printed to ${_printerService.printerLabel(printer)}.')),
       );
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Print failed: $e')),
+        SnackBar(content: Text('Direct print failed: $e')),
       );
     } finally {
       if (mounted) {
         setState(() => _printingDirect = false);
       }
     }
-  }
-
-  Future<PrinterDevice?> _pickPrinter(List<PrinterDevice> printers) {
-    return showModalBottomSheet<PrinterDevice>(
-      context: context,
-      showDragHandle: true,
-      builder: (context) {
-        return SafeArea(
-          child: ListView.separated(
-            shrinkWrap: true,
-            itemCount: printers.length,
-            separatorBuilder: (_, __) => const Divider(height: 1),
-            itemBuilder: (context, index) {
-              final printer = printers[index];
-              return ListTile(
-                leading: Icon(
-                  printer.connectionType == PrinterConnectionType.usb
-                      ? Icons.usb
-                      : Icons.bluetooth,
-                ),
-                title: Text(_printerService.printerLabel(printer)),
-                onTap: () => Navigator.of(context).pop(printer),
-              );
-            },
-          ),
-        );
-      },
-    );
   }
 
   Future<void> _saveAsPdf() async {
@@ -259,6 +280,7 @@ class _InvoicePreviewPageState extends State<InvoicePreviewPage> {
       return;
     }
 
+    final wasPaidBefore = _isPaid;
     setState(() => _savingPayment = true);
     final result = await widget.onRecordPayment!.call();
     if (!mounted) return;
@@ -266,11 +288,19 @@ class _InvoicePreviewPageState extends State<InvoicePreviewPage> {
     setState(() {
       _savingPayment = false;
       if (result != null) {
-        _isPaid = true;
-        _invoiceNumber = result['invoiceNumber'] ?? _invoiceNumber;
-        _billNo = result['billNo'] ?? _billNo;
-        _paymentId = result['paymentId'] ?? _paymentId;
-        _shortCode = result['shortCode'] ?? _shortCode;
+        _isPaid = (result['isPaid'] ?? 'true').toString().toLowerCase() == 'true';
+        _invoiceNumber = (result['invoiceNumber'] ?? '').trim().isNotEmpty
+            ? (result['invoiceNumber'] ?? _invoiceNumber)
+            : _invoiceNumber;
+        _billNo = ((result['refId'] ?? result['billNo'] ?? '').trim().isNotEmpty)
+            ? (result['refId'] ?? result['billNo'] ?? _billNo)
+            : _billNo;
+        _paymentId = (result['paymentId'] ?? '').trim().isNotEmpty
+            ? (result['paymentId'] ?? _paymentId)
+            : _paymentId;
+        _shortCode = (result['shortCode'] ?? '').trim().isNotEmpty
+            ? (result['shortCode'] ?? _shortCode)
+            : _shortCode;
       }
     });
 
@@ -278,11 +308,46 @@ class _InvoicePreviewPageState extends State<InvoicePreviewPage> {
       return;
     }
 
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('Payment recorded. Printing receipt...')),
-    );
+    final becamePaidFromManualCollect = !wasPaidBefore && _isPaid;
+    if (becamePaidFromManualCollect && widget.autoPrintWhenPaid && !_hasAutoPrintedAfterPaid) {
+      _hasAutoPrintedAfterPaid = true;
+      await _printInvoice();
+    }
 
-    await _printInvoice();
+    if (!mounted) return;
+
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Payment recorded successfully.')),
+    );
+  }
+
+  void _onNavBarTap(int index) {
+    switch (index) {
+      case 0:
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => const DashboardPage()),
+        );
+        break;
+      case 1:
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => const PaymentPage()),
+        );
+        break;
+      case 2:
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => const ProfilePage()),
+        );
+        break;
+      case 3:
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => const PrinterSettingsPage()),
+        );
+        break;
+    }
   }
 
   @override
@@ -297,7 +362,12 @@ class _InvoicePreviewPageState extends State<InvoicePreviewPage> {
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16),
         child: Card(
-          elevation: 3,
+          elevation: 0,
+          color: Colors.white,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(20),
+            side: const BorderSide(color: Color(0xFFE2E8F0)),
+          ),
           child: Padding(
             padding: const EdgeInsets.all(16),
             child: Column(
@@ -369,8 +439,11 @@ class _InvoicePreviewPageState extends State<InvoicePreviewPage> {
                 ),
                 const SizedBox(height: 8),
                 Text('Invoice ID: $invoiceId'),
+                if (_isPaid) Text('Receipt No: $invoiceId'),
                 if (ReceiptIdFormatter.hasValue(_billNo))
                   Text('Bill No: ${ReceiptIdFormatter.trimValue(_billNo)}'),
+                if (ReceiptIdFormatter.hasValue(_billNo))
+                  Text('Ref ID: ${ReceiptIdFormatter.trimValue(_billNo)}'),
                 Text('Payment ID: $paymentId'),
                 Text('Date: $dateText'),
                 const SizedBox(height: 8),
@@ -424,9 +497,7 @@ class _InvoicePreviewPageState extends State<InvoicePreviewPage> {
                             child: CircularProgressIndicator(strokeWidth: 2),
                           )
                         : const Icon(Icons.print),
-                    label: Text(_printingDirect
-                        ? 'PRINTING...'
-                        : 'Print (USB/Bluetooth)'),
+                    label: Text(_printingDirect ? 'PRINTING...' : 'Print Receipt'),
                   ),
                 ),
                 const SizedBox(height: 10),
@@ -442,6 +513,10 @@ class _InvoicePreviewPageState extends State<InvoicePreviewPage> {
             ),
           ),
         ),
+      ),
+      bottomNavigationBar: AppBottomNav(
+        currentIndex: 0,
+        onTap: _onNavBarTap,
       ),
     );
   }

@@ -352,27 +352,28 @@ class ApiService {
     int? statusCode,
   }) {
     if (body is Map) {
-      final decoded = Map<String, dynamic>.from(body as Map);
+      final decoded = Map<String, dynamic>.from(body);
       final receipt = decoded['receipt'];
-      final isSuccess = decoded['status'] == 'success' ||
-          (decoded['message']?.toString().toLowerCase() ?? '').contains('success') ||
-          decoded['paymentId'] != null ||
-          decoded['invoiceId'] != null ||
-          decoded['golisBillNo'] != null ||
-          (receipt is Map &&
-              (receipt['paymentId'] != null ||
-                  receipt['invoiceId'] != null ||
-                  receipt['golisBillNo'] != null));
+      final receiptMap = receipt is Map ? Map<String, dynamic>.from(receipt) : null;
 
-      final normalized = <String, dynamic>{'success': isSuccess, ...decoded};
-
-      if (decoded['paymentId'] == null && receipt is Map) {
-        normalized['paymentId'] = receipt['paymentId'];
-        normalized['invoiceId'] = receipt['invoiceId'] ?? receipt['invoiceNumber'];
-        normalized['golisBillNo'] = receipt['golisBillNo'];
+      final merged = <String, dynamic>{...decoded};
+      if (receiptMap != null) {
+        for (final entry in receiptMap.entries) {
+          final key = entry.key.toString();
+          if (!merged.containsKey(key)) {
+            merged[key] = entry.value;
+          }
+        }
       }
 
-      if (decoded['status'] == 'error' || statusCode != null && statusCode >= 400) {
+      final isSuccess = merged['status'] == 'success' ||
+          (merged['message']?.toString().toLowerCase() ?? '').contains('success') ||
+          merged['paymentId'] != null ||
+          merged['invoiceId'] != null;
+
+      final normalized = <String, dynamic>{'success': isSuccess, ...merged};
+
+      if (merged['status'] == 'error' || statusCode != null && statusCode >= 400) {
         normalized['success'] = false;
       }
 
@@ -384,6 +385,40 @@ class ApiService {
     }
 
     return {'success': false, 'message': 'Payment failed. Please try again.'};
+  }
+
+  static Map<String, dynamic> normalizeReceiptResponse(dynamic body) {
+    if (body is! Map) {
+      return <String, dynamic>{};
+    }
+
+    final topLevel = Map<String, dynamic>.from(body);
+    final normalized = <String, dynamic>{...topLevel};
+
+    final data = topLevel['data'];
+    final dataMap = data is Map ? Map<String, dynamic>.from(data) : null;
+    final receipt = dataMap?['receipt'] ?? topLevel['receipt'];
+    final payment = dataMap?['payment'] ?? topLevel['payment'];
+
+    final sources = <Map<String, dynamic>>[];
+    if (dataMap != null) sources.add(dataMap);
+    if (receipt is Map) sources.add(Map<String, dynamic>.from(receipt));
+    if (payment is Map) sources.add(Map<String, dynamic>.from(payment));
+
+    for (final source in sources) {
+      for (final entry in source.entries) {
+        final key = entry.key.toString();
+        final value = entry.value;
+        final hasTopLevel = normalized.containsKey(key) &&
+            normalized[key] != null &&
+            normalized[key].toString().trim().isNotEmpty;
+        if (!hasTopLevel) {
+          normalized[key] = value;
+        }
+      }
+    }
+
+    return normalized;
   }
 
   static Future<dynamic> pay(Map<String, dynamic> data,
@@ -453,6 +488,111 @@ class ApiService {
         'success': false,
         'message': 'Network error while connecting to server.',
       };
+    }
+  }
+
+  static Future<dynamic> collectGeneratedInvoice(
+    int paymentId,
+    Map<String, dynamic> data, {
+    String? accessToken,
+  }) async {
+    try {
+      final response = await _postPayment(
+        '/payments/$paymentId/collect',
+        data,
+        accessToken: accessToken,
+      ).timeout(const Duration(seconds: 20));
+
+      dynamic body;
+      if (response.body.isNotEmpty) {
+        try {
+          body = jsonDecode(response.body);
+        } catch (_) {
+          body = response.body;
+        }
+      }
+
+      if (response.statusCode == 200 || response.statusCode == 201) {
+        return normalizePaymentResponse(body, statusCode: response.statusCode);
+      }
+
+      if (body is Map<String, dynamic>) {
+        return normalizePaymentResponse(body, statusCode: response.statusCode);
+      }
+
+      if (body is String && body.trim().isNotEmpty) {
+        return {
+          'success': false,
+          'message': body.trim(),
+        };
+      }
+
+      if (response.statusCode >= 500) {
+        return {
+          'success': false,
+          'message': 'Server error while collecting generated invoice.',
+        };
+      }
+
+      return {
+        'success': false,
+        'message': 'Failed to collect generated invoice.',
+      };
+    } on TimeoutException {
+      return {
+        'success': false,
+        'message':
+            'Request timed out. Please check your internet and try again.',
+      };
+    } on SocketException {
+      return {
+        'success': false,
+        'message': 'No internet connection. Please check your network.',
+      };
+    } on http.ClientException {
+      return {
+        'success': false,
+        'message': 'Network error while connecting to server.',
+      };
+    }
+  }
+
+  static Future<Map<String, dynamic>?> createPaymentPreview(
+    Map<String, dynamic> data, {
+    String? accessToken,
+  }) async {
+    try {
+      final response = await _postPayment('/payments/preview', data,
+              accessToken: accessToken)
+          .timeout(const Duration(seconds: 20));
+
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        return null;
+      }
+
+      if (response.body.isEmpty) {
+        return null;
+      }
+
+      final decoded = jsonDecode(response.body);
+      if (decoded is! Map<String, dynamic>) {
+        return null;
+      }
+
+      final receipt = decoded['receipt'];
+      if (receipt is Map<String, dynamic>) {
+        return receipt;
+      }
+
+      return decoded;
+    } on TimeoutException {
+      return null;
+    } on SocketException {
+      return null;
+    } on http.ClientException {
+      return null;
+    } on FormatException {
+      return null;
     }
   }
 

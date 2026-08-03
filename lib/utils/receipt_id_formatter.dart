@@ -19,7 +19,25 @@ class ReceiptIdFormatter {
       return '';
     }
 
-    return formatted.length > 9 ? formatted.substring(0, 9) : formatted;
+    return buildPaymentShortCode(formatted);
+  }
+
+  static String buildPaymentShortCode(String paymentId) {
+    final formatted = formatPaymentId(paymentId);
+    if (formatted.isEmpty) {
+      return '';
+    }
+
+    return '*3440*$formatted#';
+  }
+
+  static String resolveShortCode(String paymentId, {String? provided}) {
+    final expected = buildPaymentShortCode(paymentId);
+    if (expected.isNotEmpty) {
+      return expected;
+    }
+
+    return trimValue(provided ?? '');
   }
 
   static bool hasValue(String value) => value.trim().isNotEmpty;

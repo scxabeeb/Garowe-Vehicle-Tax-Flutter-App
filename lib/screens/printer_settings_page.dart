@@ -2,6 +2,10 @@ import 'package:flutter/material.dart';
 import 'package:unified_esc_pos_printer/unified_esc_pos_printer.dart';
 
 import '../services/esc_pos_printer_service.dart';
+import '../widgets/app_bottom_nav.dart';
+import 'dashboard_page.dart';
+import 'payment_page.dart';
+import 'profile_page.dart';
 
 class PrinterSettingsPage extends StatefulWidget {
   const PrinterSettingsPage({super.key});
@@ -113,6 +117,35 @@ class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
         _savedPrinterKey == _printerService.printerStableKey(printer);
   }
 
+  void _onNavBarTap(int index) {
+    switch (index) {
+      case 0:
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => const DashboardPage()),
+        );
+        break;
+      case 1:
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => const PaymentPage()),
+        );
+        break;
+      case 2:
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => const ProfilePage()),
+        );
+        break;
+      case 3:
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => const PrinterSettingsPage()),
+        );
+        break;
+    }
+  }
+
   String _typeKey(PrinterConnectionType type) {
     switch (type) {
       case PrinterConnectionType.usb:
@@ -130,9 +163,30 @@ class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Printer Settings'),
-        backgroundColor: const Color(0xFF0B57D0),
-        foregroundColor: Colors.white,
+        flexibleSpace: Container(
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              colors: [Color(0xFF0B57D0), Color(0xFF1E40AF)],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+            ),
+          ),
+        ),
+        title: Row(
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(10),
+              child: Image.asset(
+                'assets/images/Logo.jpeg',
+                width: 28,
+                height: 28,
+                fit: BoxFit.cover,
+              ),
+            ),
+            const SizedBox(width: 10),
+            const Text('Printer Settings'),
+          ],
+        ),
       ),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
@@ -242,6 +296,10 @@ class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
                 ),
               ],
             ),
+      bottomNavigationBar: AppBottomNav(
+        currentIndex: 3,
+        onTap: _onNavBarTap,
+      ),
     );
   }
 }

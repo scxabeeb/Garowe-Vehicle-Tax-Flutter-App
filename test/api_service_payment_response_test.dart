@@ -38,4 +38,41 @@ void main() {
       expect(result['golisBillNo'], 'GB-7');
     });
   });
+
+  group('ApiService receipt response normalization', () {
+    test('flattens nested data and receipt payloads', () {
+      final result = ApiService.normalizeReceiptResponse({
+        'status': 'success',
+        'data': {
+          'receipt': {
+            'paymentId': 88,
+            'invoiceId': 'INV-88',
+            'receiptNumber': 'RCPT-88',
+            'golisBillNo': 'GB-88',
+          },
+        },
+      });
+
+      expect(result['paymentId'], 88);
+      expect(result['invoiceId'], 'INV-88');
+      expect(result['receiptNumber'], 'RCPT-88');
+      expect(result['golisBillNo'], 'GB-88');
+    });
+
+    test('keeps top-level values while filling missing nested fields', () {
+      final result = ApiService.normalizeReceiptResponse({
+        'paymentId': 14,
+        'data': {
+          'payment': {
+            'invoiceId': 'INV-14',
+            'shortCode': 'P000014',
+          },
+        },
+      });
+
+      expect(result['paymentId'], 14);
+      expect(result['invoiceId'], 'INV-14');
+      expect(result['shortCode'], 'P000014');
+    });
+  });
 }

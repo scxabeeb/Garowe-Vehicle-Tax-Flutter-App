@@ -85,8 +85,12 @@ class EscPosPrinterService {
       ticket.text('Vehicle Tax Receipt', align: PrintAlign.center);
       ticket.separator();
       ticket.text('Invoice ID: $invoiceId');
+      if (data.isPaid) {
+        ticket.text('Receipt Number: $invoiceId');
+      }
       if (ReceiptIdFormatter.hasValue(data.billNo)) {
         ticket.text('Bill No: ${ReceiptIdFormatter.trimValue(data.billNo)}');
+        ticket.text('Ref ID: ${ReceiptIdFormatter.trimValue(data.billNo)}');
       }
       ticket.text('Payment ID: $paymentId');
       ticket.text('Status: ${data.isPaid ? 'PAID' : 'NOT PAID'}');

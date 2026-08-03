@@ -1,32 +1,29 @@
-import 'package:flutter/material.dart';
 import 'dart:convert';
+
+import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:intl/intl.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../services/api_service.dart';
 import '../services/session.dart';
-import 'payment_page.dart';
-import 'todays_payments_page.dart';
+import '../utils/receipt_id_formatter.dart';
+import 'invoice_preview_page.dart';
 import 'login_page.dart';
+import 'payment_page.dart';
 import 'printer_settings_page.dart';
 import 'profile_page.dart';
+import 'todays_payments_page.dart';
 
-/// Brand color palette for the Garowe Vehicle Tax System.
 class BrandColors {
   static const Color primary = Color(0xFF0B57D0);
   static const Color primaryDark = Color(0xFF1E40AF);
+  static const Color secondary = Color(0xFF14B8A6);
   static const Color accent = Color(0xFFE65100);
-  static const Color background = Color(0xFFF4F7FC);
-  static const Color cardBg = Color(0xFFFFFFFF);
+  static const Color background = Color(0xFFF8FAFC);
   static const Color textPrimary = Color(0xFF0F172A);
-  static const Color textSecondary = Color(0xFF6474A1);
-
-  static const LinearGradient headerGradient = LinearGradient(
-    colors: [primaryDark, primary],
-    begin: Alignment.topLeft,
-    end: Alignment.bottomRight,
-  );
+  static const Color textSecondary = Color(0xFF64748B);
+  static const Color border = Color(0xFFE2E8F0);
 }
 
 class DashboardPage extends StatefulWidget {
@@ -38,23 +35,13 @@ class DashboardPage extends StatefulWidget {
 
 class _DashboardPageState extends State<DashboardPage> {
   static const Duration _eatOffset = Duration(hours: 3);
+  static const int _pageSize = 2;
 
   bool loading = true;
   String? error;
-
-  int totalVehicles = 0;
-  int totalPayments = 0;
-  double todayTotal = 0;
-
   List<dynamic> todaysPayments = [];
-  List<dynamic> filteredPayments = [];
-
-  // ── Date picker state ──────────────────────────────────────────
-  DateTime _selectedDate = DateTime.now();
-
   int? _currentUserId;
-
-  int? _resolvedCollectorId;
+  int _currentPage = 0;
 
   @override
   void initState() {
@@ -68,39 +55,13 @@ class _DashboardPageState extends State<DashboardPage> {
       final prefs = await SharedPreferences.getInstance();
       _currentUserId = prefs.getInt('userId') ?? prefs.getInt('collectorId');
     }
-    _resolvedCollectorId = _currentUserId;
-
     if (!mounted) return;
-    loadDashboard();
-    _loadPaymentsForDate(_selectedDate);
+    await loadDashboard();
   }
 
   bool get isAdmin => (Session.role ?? '').toLowerCase() == 'admin';
 
   DateTime _toEat(DateTime input) => input.toUtc().add(_eatOffset);
-
-  String _formatEatTime(dynamic payment) {
-    if (payment is! Map<String, dynamic>) return '-';
-
-    final candidates = [
-      payment['paidAt'],
-      payment['date'],
-      payment['createdAt'],
-      payment['time'],
-    ];
-
-    for (final candidate in candidates) {
-      if (candidate is String && candidate.trim().isNotEmpty) {
-        final parsed = DateTime.tryParse(candidate.trim());
-        if (parsed != null) {
-          final eat = _toEat(parsed);
-          return DateFormat('MMM dd, HH:mm').format(eat);
-        }
-      }
-    }
-
-    return (payment['time'] ?? '-').toString();
-  }
 
   int? _toInt(dynamic value) {
     if (value is int) return value;
@@ -134,8 +95,13 @@ class _DashboardPageState extends State<DashboardPage> {
         .toString()
         .trim()
         .toLowerCase();
-
     if (collectorName == myUsername) return true;
+
+    final collectorUsername = (payment['collectorUsername'] ?? payment['username'] ?? '')
+        .toString()
+        .trim()
+        .toLowerCase();
+    if (collectorUsername == myUsername) return true;
 
     final collectorMap = payment['collector'];
     if (collectorMap is Map<String, dynamic>) {
@@ -143,37 +109,187 @@ class _DashboardPageState extends State<DashboardPage> {
           .toString()
           .trim()
           .toLowerCase();
-      return username == myUsername;
+      if (username == myUsername) return true;
+
+      final name = (collectorMap['name'] ?? '')
+          .toString()
+          .trim()
+          .toLowerCase();
+      return name == myUsername;
     }
 
     return false;
   }
 
-  List<dynamic> get visiblePayments =>
-      isAdmin ? todaysPayments : todaysPayments.where(_isMyRecord).toList();
+  List<dynamic> get visiblePayments {
+    final filtered = isAdmin ? todaysPayments : todaysPayments.where(_isMyRecord).toList();
+    return filtered
+        .where((p) => p is Map<String, dynamic> && p['isReverted'] != true)
+        .where((p) => p is Map<String, dynamic> && _isPaidPayment(p))
+        .toList();
+  }
 
-  // ── Date-specific stats (computed from filteredPayments) ────────
-  int get selectedDatePaymentCount => filteredPayments.length;
-
-  int get selectedDateVehicleCount {
-    final plates = <dynamic>{};
-    for (final p in filteredPayments) {
-      final plate = p['plate'] ?? p['plateNumber'] ?? p['plate'];
-      if (plate != null && plate != '-') plates.add(plate);
+  int get todayVehicleCount {
+    final plates = <String>{};
+    for (final payment in visiblePayments) {
+      final plate = (payment['plate'] ?? payment['plateNumber'] ?? '').toString().trim();
+      if (plate.isNotEmpty && plate != '-') {
+        plates.add(plate.toUpperCase());
+      }
     }
     return plates.length;
   }
 
-  double get selectedDateTotal {
+  int get todayPaymentCount => visiblePayments.length;
+
+  double get todayTotalAmount {
     double sum = 0;
-    for (final p in filteredPayments) {
-      final amount = (p['amount'] as num?)?.toDouble() ?? 0;
-      sum += amount;
+    for (final payment in visiblePayments) {
+      sum += (payment['amount'] as num?)?.toDouble() ?? 0;
     }
     return sum;
   }
 
-  // ── Dashboard stats (aggregate from backend) ────────────────────
+  List<dynamic> get pagedPayments {
+    final start = _currentPage * _pageSize;
+    if (start >= visiblePayments.length) return const [];
+    return visiblePayments.skip(start).take(_pageSize).toList();
+  }
+
+  int get pageCount {
+    if (visiblePayments.isEmpty) return 1;
+    return (visiblePayments.length / _pageSize).ceil();
+  }
+
+  void _changePage(int delta) {
+    final next = _currentPage + delta;
+    if (next < 0 || next >= pageCount) return;
+    setState(() => _currentPage = next);
+  }
+
+  String _formatEatTime(dynamic payment) {
+    if (payment is! Map<String, dynamic>) return '-';
+
+    final candidates = [
+      payment['paidAt'],
+      payment['date'],
+      payment['createdAt'],
+      payment['time'],
+    ];
+
+    for (final candidate in candidates) {
+      if (candidate is String && candidate.trim().isNotEmpty) {
+        final parsed = DateTime.tryParse(candidate.trim());
+        if (parsed != null) {
+          return DateFormat('MMM dd, HH:mm').format(_toEat(parsed));
+        }
+      }
+    }
+
+    return (payment['time'] ?? '-').toString();
+  }
+
+  String _readScalarString(
+    Map<String, dynamic> map,
+    List<String> keys, {
+    String fallback = '',
+  }) {
+    for (final key in keys) {
+      final value = map[key];
+      if (value == null) continue;
+      final text = value.toString().trim();
+      if (text.isNotEmpty && text.toLowerCase() != 'null') {
+        return text;
+      }
+    }
+    return fallback;
+  }
+
+  Map<String, dynamic> _receiptPayloadOnly(Map<String, dynamic> payload) {
+    final receipt = payload['receipt'];
+    if (receipt is Map<String, dynamic>) return receipt;
+    final data = payload['data'];
+    if (data is Map<String, dynamic>) return data;
+    final result = payload['result'];
+    if (result is Map<String, dynamic>) return result;
+    return payload;
+  }
+
+  bool _asBool(dynamic value) {
+    if (value is bool) return value;
+    if (value is num) return value != 0;
+    if (value is String) {
+      final normalized = value.trim().toLowerCase();
+      return normalized == 'true' ||
+          normalized == '1' ||
+          normalized == 'paid' ||
+          normalized == 'success' ||
+          normalized == 'completed';
+    }
+    return false;
+  }
+
+  bool _isPaidPayment(Map<String, dynamic> payment) {
+    final status = _readScalarString(
+      payment,
+      ['status', 'paymentStatus', 'state'],
+      fallback: '',
+    ).toLowerCase();
+
+    if (status == 'paid' || status == 'completed') {
+      return true;
+    }
+
+    if (_asBool(payment['isPaid']) || _asBool(payment['paid'])) {
+      return true;
+    }
+
+    final paidAtText = _readScalarString(payment, ['paidAt', 'paidAtUtc']);
+    if (paidAtText.isNotEmpty) {
+      return true;
+    }
+
+    return false;
+  }
+
+  DateTime? _parseDate(Map<String, dynamic> payment) {
+    final candidates = [
+      payment['paidAt'],
+      payment['date'],
+      payment['createdAt'],
+      payment['time'],
+      payment['paidAtUtc'],
+    ];
+
+    for (final candidate in candidates) {
+      if (candidate is String && candidate.trim().isNotEmpty) {
+        final parsed = DateTime.tryParse(candidate.trim());
+        if (parsed != null) return _toEat(parsed);
+      }
+    }
+
+    return null;
+  }
+
+  String _collectorName(dynamic payment) {
+    if (payment is! Map<String, dynamic>) return '-';
+
+    final direct = payment['collectorName'];
+    if (direct is String && direct.trim().isNotEmpty) {
+      return direct.trim();
+    }
+
+    final collector = payment['collector'];
+    if (collector is Map<String, dynamic>) {
+      final username = collector['username'];
+      if (username is String && username.trim().isNotEmpty) {
+        return username.trim();
+      }
+    }
+
+    return '-';
+  }
+
   Future<void> loadDashboard() async {
     setState(() {
       loading = true;
@@ -181,29 +297,27 @@ class _DashboardPageState extends State<DashboardPage> {
     });
 
     try {
-      final url = '${ApiService.baseUrl}/Dashboard';
       final res = await http
-          .get(Uri.parse(url))
+          .get(Uri.parse('${ApiService.baseUrl}/Dashboard'))
           .timeout(const Duration(seconds: 20));
 
-      if (res.statusCode == 200) {
-        final data = jsonDecode(res.body);
-        setState(() {
-          totalVehicles = _toInt(data['totalVehicles']) ?? 0;
-          totalPayments = _toInt(data['totalPayments']) ?? 0;
-          todayTotal = (data['todayTotal'] as num?)?.toDouble() ?? 0;
-          todaysPayments = data['todaysPayments'] ?? [];
-          loading = false;
-        });
-        // Load payments for the selected date after dashboard loads
-        _loadPaymentsForDate(_selectedDate);
-      } else {
+      if (res.statusCode != 200) {
         setState(() {
           loading = false;
           error = 'Failed to load dashboard data. Status: ${res.statusCode}';
         });
+        return;
       }
-    } catch (e) {
+
+      final data = jsonDecode(res.body);
+      final payments = data is Map<String, dynamic> ? data['todaysPayments'] : null;
+
+      setState(() {
+        todaysPayments = payments is List ? payments : <dynamic>[];
+        _currentPage = 0;
+        loading = false;
+      });
+    } catch (_) {
       setState(() {
         loading = false;
         error = 'Network error. Please check your connection.';
@@ -211,100 +325,167 @@ class _DashboardPageState extends State<DashboardPage> {
     }
   }
 
-  // ── Fetch payments for a specific date ─────────────────────────
-  Future<void> _loadPaymentsForDate(DateTime date) async {
-    setState(() {
-      loading = true;
-      error = null;
-      _selectedDate = date;
-    });
+  Future<Map<String, dynamic>?> _loadReceipt(int paymentId) async {
+    final res = await http
+        .get(Uri.parse('${ApiService.baseUrl}/payments/$paymentId/receipt'))
+        .timeout(const Duration(seconds: 20));
 
-    final targetDate = DateUtils.dateOnly(_toEat(date));
-
-    // Try the collector endpoint first (gives us all payments to filter)
-    final collectorId = _resolvedCollectorId;
-    if (collectorId != null) {
-      try {
-        final res = await http
-            .get(
-              Uri.parse('${ApiService.baseUrl}/payments/collector/$collectorId'),
-            )
-            .timeout(const Duration(seconds: 20));
-
-        if (res.statusCode == 200) {
-          final data = jsonDecode(res.body);
-          final items = data['items'] ?? data;
-
-          if (items is List) {
-            final matching = items.where((item) {
-              if (item is! Map<String, dynamic>) return false;
-              if (item['isReverted'] == true) return false;
-
-              final candidates = [
-                item['paidAt'],
-                item['date'],
-                item['createdAt'],
-              ];
-
-              for (final c in candidates) {
-                if (c is String && c.trim().isNotEmpty) {
-                  final parsed = DateTime.tryParse(c.trim());
-                  if (parsed != null) {
-                    final eat = _toEat(parsed);
-                    if (DateUtils.isSameDay(
-                        DateUtils.dateOnly(eat), targetDate)) {
-                      return true;
-                    }
-                  }
-                }
-              }
-              return false;
-            }).toList();
-
-            setState(() {
-              filteredPayments = matching;
-              loading = false;
-            });
-            return;
-          }
-        }
-      } catch (e) {
-        // fall through to dashboard fallback
-      }
+    if (res.statusCode != 200) return null;
+    final decoded = jsonDecode(res.body);
+    if (decoded is Map<String, dynamic>) {
+      final receipt = decoded['receipt'];
+      if (receipt is Map<String, dynamic>) return receipt;
+      return decoded;
     }
+    return null;
+  }
 
-    // Fallback: use dashboard today's payments if the date is today
-    final now = _toEat(DateTime.now());
-    if (DateUtils.isSameDay(targetDate, DateUtils.dateOnly(now))) {
-      setState(() {
-        filteredPayments = visiblePayments;
-        loading = false;
-      });
+  Future<void> _openPaymentReceipt(dynamic payment) async {
+    if (payment is! Map<String, dynamic>) return;
+
+    final invoiceId = _readScalarString(
+      payment,
+      [
+        'invoiceId',
+        'invoiceNumber',
+        'invoiceNo',
+        'invoice_no',
+        'invoice',
+      ],
+    );
+    final paymentId = _readScalarString(
+      payment,
+      ['paymentId', 'paymentID', 'payment_id', 'id'],
+    );
+    final billNo = _readScalarString(
+      payment,
+      [
+        'golisBillNo',
+        'transactionId',
+        'billNo',
+        'billNumber',
+        'referenceNumber',
+        'refNo',
+        'refId',
+      ],
+    );
+    final rawShortCode = _readScalarString(
+      payment,
+      ['shortCode', 'short_code'],
+      fallback: '',
+    );
+    final shortCode = ReceiptIdFormatter.resolveShortCode(
+      paymentId,
+      provided: rawShortCode,
+    );
+    final plate = _readScalarString(payment, ['plate', 'plateNumber', 'plate_number'], fallback: '-');
+    final owner = _readScalarString(payment, ['owner', 'ownerName', 'owner_name'], fallback: '-');
+    final movement = _readScalarString(payment, ['movement', 'movementType', 'movement_type'], fallback: '-');
+    final amount = (payment['amount'] as num?)?.toDouble() ?? 0;
+    final quantity = (_toInt(payment['quantity']) ?? 1).clamp(1, 999999);
+    final unitAmount = quantity > 0 ? amount / quantity : amount;
+    final paidAtFallback = _parseDate(payment) ?? _toEat(DateTime.now());
+
+    final parsedPaymentId = int.tryParse(paymentId);
+    final receipt = (parsedPaymentId != null && parsedPaymentId > 0)
+        ? await _loadReceipt(parsedPaymentId)
+        : null;
+    if (receipt == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Unable to load official backend receipt IDs.')),
+        );
+      }
       return;
     }
+    final receiptSource = _receiptPayloadOnly(receipt);
 
-    // No matching date
-    setState(() {
-      filteredPayments = [];
-      loading = false;
-      error = 'No payments found for ${DateFormat('MMM d, yyyy').format(date)}.';
-    });
-  }
+    final resolvedInvoiceId = _readScalarString(
+      receiptSource,
+      [
+        'invoiceId',
+        'invoiceNumber',
+        'invoiceNo',
+        'invoice_no',
+        'invoice',
+      ],
+      fallback: invoiceId,
+    );
+    final resolvedPaymentId = _readScalarString(
+      receiptSource,
+      ['paymentId', 'paymentID', 'payment_id', 'id'],
+      fallback: paymentId,
+    );
+    final resolvedBillNo = _readScalarString(
+      receiptSource,
+      [
+        'receiptId',
+        'receiptNumber',
+        'golisBillNo',
+        'transactionId',
+        'billNo',
+        'billNumber',
+        'referenceNumber',
+        'refNo',
+        'refId',
+      ],
+      fallback: billNo,
+    );
+    final resolvedShortCodeRaw = _readScalarString(
+      receiptSource,
+      ['shortCode', 'short_code'],
+      fallback: shortCode,
+    );
+    final resolvedShortCode = ReceiptIdFormatter.resolveShortCode(
+      resolvedPaymentId,
+      provided: resolvedShortCodeRaw,
+    );
+    final paidAt = _parseDate(receiptSource) ?? paidAtFallback;
+    final isPaid = _isPaidPayment(receiptSource) || _isPaidPayment(payment);
+    final safeBillNo =
+      resolvedBillNo.trim().toLowerCase() == resolvedInvoiceId.trim().toLowerCase()
+        ? ''
+        : resolvedBillNo;
 
-  // ── Date picker ────────────────────────────────────────────────
-  Future<void> _pickDate() async {
-    final date = await showDatePicker(
-      context: context,
-      initialDate: _selectedDate,
-      firstDate: DateTime(2020),
-      lastDate: DateTime(2100),
+    if (!mounted) return;
+
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => InvoicePreviewPage(
+          invoiceNumber: resolvedInvoiceId,
+          billNo: safeBillNo,
+          paymentId: resolvedPaymentId,
+          shortCode: resolvedShortCode,
+          plateNumber: plate,
+          ownerName: owner,
+          movementName: movement,
+          quantity: quantity,
+          unitAmount: unitAmount,
+          totalAmount: amount,
+          collectorName: _collectorName(payment),
+          paidAt: paidAt,
+          isPaid: isPaid,
+          canRecordPayment: false,
+        ),
+      ),
     );
 
-    if (date == null) return;
-    await _loadPaymentsForDate(date);
+    await loadDashboard();
   }
 
-  // ── Navigation ─────────────────────────────────────────────────
+  void logout() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.clear();
+    Session.clear();
+
+    if (!mounted) return;
+    Navigator.of(context).pushAndRemoveUntil(
+      MaterialPageRoute(builder: (_) => const LoginPage()),
+      (route) => false,
+    );
+  }
+
   void _onNavBarTap(int index) {
     switch (index) {
       case 0:
@@ -313,7 +494,7 @@ class _DashboardPageState extends State<DashboardPage> {
           MaterialPageRoute(
             builder: (_) => TodaysPaymentsPage(
               payments: visiblePayments,
-              selectedDate: _selectedDate,
+              selectedDate: DateTime.now(),
             ),
           ),
         ).then((_) => loadDashboard());
@@ -339,18 +520,6 @@ class _DashboardPageState extends State<DashboardPage> {
     }
   }
 
-  Future<void> logout() async {
-    final prefs = await SharedPreferences.getInstance();
-    await prefs.clear();
-    Session.clear();
-
-    Navigator.of(context).pushAndRemoveUntil(
-      MaterialPageRoute(builder: (_) => const LoginPage()),
-      (route) => false,
-    );
-  }
-
-  // ── UI BUILDERS ────────────────────────────────────────────────
   Widget _buildStatCard({
     required String title,
     required String value,
@@ -368,7 +537,7 @@ class _DashboardPageState extends State<DashboardPage> {
         side: BorderSide(color: Colors.blueGrey.shade50),
       ),
       child: Padding(
-        padding: const EdgeInsets.all(10),
+        padding: const EdgeInsets.all(12),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
@@ -392,11 +561,7 @@ class _DashboardPageState extends State<DashboardPage> {
                       color: (trendColor ?? Colors.green).withValues(alpha: 0.12),
                       shape: BoxShape.circle,
                     ),
-                    child: Icon(
-                      trendIcon,
-                      color: trendColor ?? Colors.green,
-                      size: 18,
-                    ),
+                    child: Icon(trendIcon, color: trendColor ?? Colors.green, size: 18),
                   ),
               ],
             ),
@@ -423,11 +588,8 @@ class _DashboardPageState extends State<DashboardPage> {
             if (subtitle != null) ...[
               const SizedBox(height: 2),
               Text(
-                subtitle!,
-                style: TextStyle(
-                  fontSize: 12,
-                  color: Colors.blueGrey.shade500,
-                ),
+                subtitle,
+                style: TextStyle(fontSize: 12, color: Colors.blueGrey.shade500),
               ),
             ],
           ],
@@ -436,141 +598,63 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 
-  Widget _buildQuickAction({
-    required IconData icon,
-    required String label,
-    required Color color,
-    required VoidCallback onTap,
-  }) {
-    return GestureDetector(
-      onTap: onTap,
-      child: Column(
-        children: [
-          Container(
-            width: 64,
-            height: 64,
-            decoration: BoxDecoration(
-              gradient: LinearGradient(
-                colors: [
-                  color.withValues(alpha: 0.2),
-                  color.withValues(alpha: 0.1),
-                ],
-                begin: Alignment.topLeft,
-                end: Alignment.bottomRight,
-              ),
-              borderRadius: BorderRadius.circular(20),
-              border: Border.all(color: color.withValues(alpha: 0.2)),
-            ),
-            child: Icon(icon, color: color, size: 28),
-          ),
-          const SizedBox(height: 8),
-          Text(
-            label,
-            textAlign: TextAlign.center,
-            style: TextStyle(
-              fontSize: 12,
-              fontWeight: FontWeight.w600,
-              color: Colors.blueGrey.shade700,
-              height: 1.2,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildPaymentRow(dynamic payment) {
-    final plate =
-        (payment['plate'] ?? payment['plateNumber'] ?? '-').toString();
-    final movement =
-        (payment['movement'] ?? payment['movementType'] ?? '-').toString();
-    final time = _formatEatTime(payment);
-    final amount = (payment['amount'] as num?)?.toDouble() ?? 0;
-
-    final isReverted = payment['isReverted'] == true;
-
+  Widget _buildHeader(String dateStr) {
     return Container(
-      margin: const EdgeInsets.only(bottom: 12),
       padding: const EdgeInsets.all(16),
       decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: Colors.blueGrey.shade50),
+        gradient: const LinearGradient(
+          colors: [BrandColors.primary, BrandColors.primaryDark],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(24),
         boxShadow: [
           BoxShadow(
-            color: Colors.black.withValues(alpha: 0.03),
-            blurRadius: 8,
-            offset: const Offset(0, 2),
+            color: Colors.blue.shade100.withValues(alpha: 0.3),
+            blurRadius: 16,
+            offset: const Offset(0, 8),
           ),
         ],
       ),
       child: Row(
         children: [
-          Container(
-            width: 48,
-            height: 48,
-            decoration: BoxDecoration(
-              color: const Color(0xFFEEF4FF),
-              borderRadius: BorderRadius.circular(14),
-            ),
-            child: Icon(
-              isReverted ? Icons.undo : Icons.directions_car_filled,
-              color: BrandColors.primary,
-              size: 24,
+          ClipRRect(
+            borderRadius: BorderRadius.circular(16),
+            child: Image.asset(
+              'assets/images/Logo.jpeg',
+              width: 44,
+              height: 44,
+              fit: BoxFit.cover,
             ),
           ),
-          const SizedBox(width: 14),
+          const SizedBox(width: 12),
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  plate,
-                  style: TextStyle(
-                    fontSize: 16,
-                    fontWeight: FontWeight.w800,
-                    color: Colors.blueGrey.shade900,
-                    letterSpacing: 0.5,
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  movement,
-                  style: TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600,
-                    color: Colors.blueGrey.shade600,
+                  'Hello, ${Session.username ?? ''}',
+                  style: const TextStyle(
+                    fontSize: 18,
+                    fontWeight: FontWeight.w700,
+                    color: Colors.white,
                   ),
                 ),
                 const SizedBox(height: 2),
-                Text(
-                  time,
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: Colors.blueGrey.shade500,
-                  ),
-                ),
+                Text(dateStr, style: const TextStyle(fontSize: 13, color: Colors.white70)),
               ],
             ),
           ),
-          const SizedBox(width: 14),
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-            decoration: BoxDecoration(
-              color: isReverted
-                  ? Colors.red.shade50
-                  : const Color(0xFFECFDF0),
-              borderRadius: BorderRadius.circular(999),
-            ),
-            child: Text(
-              '\$${amount.toStringAsFixed(2)}',
-              style: TextStyle(
-                color: isReverted
-                    ? Colors.red.shade700
-                    : Colors.green.shade700,
-                fontWeight: FontWeight.w800,
-                fontSize: 14,
-              ),
+          ElevatedButton.icon(
+            onPressed: logout,
+            icon: const Icon(Icons.logout, size: 18),
+            label: const Text('Logout', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13)),
+            style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.white.withValues(alpha: 0.18),
+              foregroundColor: Colors.white,
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+              elevation: 0,
             ),
           ),
         ],
@@ -578,293 +662,184 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 
-  Widget _buildPager() {
-    // Since we now use date-based filtering, show record count info
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: Colors.blueGrey.shade200),
-      ),
-      child: Text(
-        '${filteredPayments.length} record${filteredPayments.length != 1 ? 's' : ''} for ${DateFormat('MMM d, yyyy').format(_selectedDate)}',
-        style: TextStyle(
-          fontWeight: FontWeight.w700,
-          color: Colors.blueGrey.shade800,
-          fontSize: 13,
-        ),
-      ),
-    );
-  }
-
-  // ── MAIN BUILD ─────────────────────────────────────────────────
-  @override
-  Widget build(BuildContext context) {
-    final now = DateTime.now();
-    final dateStr = DateFormat('EEEE, MMMM d').format(now);
-
-    return Scaffold(
-      backgroundColor: BrandColors.background,
-      body: SafeArea(
-        child: loading
-            ? const Center(child: CircularProgressIndicator())
-            : RefreshIndicator(
-                onRefresh: () async {
-                  await loadDashboard();
-                  await _loadPaymentsForDate(_selectedDate);
-                },
-                child: SingleChildScrollView(
-                  physics: const AlwaysScrollableScrollPhysics(),
-                  padding: const EdgeInsets.all(16),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      // ===== Header =====
-                      _buildHeader(dateStr),
-
-                      const SizedBox(height: 20),
-
-                      // ===== Stat Cards =====
-                      _buildStatCards(),
-
-                      // ===== Date Picker for Previous Payments =====
-                      const SizedBox(height: 24),
-                      _buildDateSection(),
-
-                      // ===== Payments List =====
-                      if (error != null)
-                        _buildErrorBanner()
-                      else if (filteredPayments.isEmpty)
-                        _buildEmptyState()
-                      else
-                        Column(
-                          children: [
-                            ...filteredPayments.map(_buildPaymentRow),
-                            const SizedBox(height: 16),
-                            _buildPager(),
-                          ],
-                        ),
-
-                    ],
-                  ),
-                ),
-              ),
-      ),
-      bottomNavigationBar: _buildBottomNavBar(),
-    );
-  }
-
-  Widget _buildHeader(String dateStr) {
-    return Row(
-      mainAxisAlignment: MainAxisAlignment.spaceBetween,
-      children: [
-        Row(
-          children: [
-            CircleAvatar(
-              radius: 24,
-              backgroundColor: BrandColors.primary,
-              child: Text(
-                (Session.username ?? 'U')
-                    .substring(0, 1)
-                    .toUpperCase(),
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontWeight: FontWeight.bold,
-                  fontSize: 20,
-                ),
-              ),
-            ),
-            const SizedBox(width: 12),
-            Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Hello, ${Session.username ?? ''}',
-                  style: TextStyle(
-                    fontSize: 18,
-                    fontWeight: FontWeight.w700,
-                    color: BrandColors.textPrimary,
-                  ),
-                ),
-                Text(
-                  dateStr,
-                  style: TextStyle(
-                    fontSize: 13,
-                    color: BrandColors.textSecondary,
-                  ),
-                ),
-              ],
-            ),
-          ],
-        ),
-        ElevatedButton.icon(
-          onPressed: logout,
-          icon: const Icon(Icons.logout, size: 18),
-          label: const Text(
-            'Logout',
-            style: TextStyle(fontWeight: FontWeight.w700, fontSize: 13),
-          ),
-          style: ElevatedButton.styleFrom(
-            backgroundColor: Colors.red.shade50,
-            foregroundColor: Colors.red.shade700,
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-            shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12),
-            ),
-            elevation: 0,
-            side: BorderSide(color: Colors.red.shade200),
-          ),
-        ),
-      ],
-    );
-  }
-
   Widget _buildStatCards() {
-    final dateLabel = DateFormat('MMM d, yyyy').format(_selectedDate);
-
     return Column(
       children: [
-        // ── Date-specific stats (Vehicles + Payments) ───────────
         Row(
           children: [
             Expanded(
               child: _buildStatCard(
-                title: 'Vehicles',
-                value: '$selectedDateVehicleCount',
+                title: 'Served Cars',
+                value: '$todayVehicleCount',
                 icon: Icons.directions_car,
                 color: BrandColors.primary,
-                subtitle: dateLabel,
+                subtitle: 'Today',
               ),
             ),
             const SizedBox(width: 12),
             Expanded(
               child: _buildStatCard(
                 title: 'Payments',
-                value: '$selectedDatePaymentCount',
+                value: '$todayPaymentCount',
                 icon: Icons.receipt_long,
                 color: Colors.blue.shade600,
-                subtitle: dateLabel,
+                subtitle: 'Today',
               ),
             ),
           ],
         ),
         const SizedBox(height: 12),
-        // ── Date-specific total ──────────────────────────────────
         _buildStatCard(
-          title: 'Total Collected',
-          value: '\$${selectedDateTotal.toStringAsFixed(2)}',
+          title: 'Today Total',
+          value: '\$${todayTotalAmount.toStringAsFixed(2)}',
           icon: Icons.attach_money,
           color: BrandColors.accent,
-          subtitle: '$selectedDatePaymentCount payments on $dateLabel',
+          subtitle: '$todayPaymentCount payments today',
           trendIcon: Icons.trending_up,
           trendColor: Colors.green.shade600,
-        ),
-        // ── Overall stats (secondary) ─────────────────────────────
-        const SizedBox(height: 12),
-        _buildStatCard(
-          title: 'All Vehicles',
-          value: '$totalVehicles',
-          icon: Icons.directions_car_outlined,
-          color: BrandColors.primaryDark,
-          subtitle: 'Total in system',
-          trendIcon: Icons.info_outline,
-          trendColor: BrandColors.primary,
         ),
       ],
     );
   }
 
-  Widget _buildDateSection() {
-    return Container(
-      padding: const EdgeInsets.all(16),
-      decoration: BoxDecoration(
-        color: Colors.white,
-        borderRadius: BorderRadius.circular(18),
-        border: Border.all(color: Colors.blueGrey.shade50),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withValues(alpha: 0.03),
-            blurRadius: 8,
-            offset: const Offset(0, 2),
-          ),
-        ],
-      ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          const Text(
-            'Filter Payments by Date',
-            style: TextStyle(
-              fontSize: 15,
-              fontWeight: FontWeight.w700,
-              color: BrandColors.textPrimary,
+  Widget _buildPaymentRow(dynamic payment) {
+    final plate = (payment['plate'] ?? payment['plateNumber'] ?? '-').toString();
+    final movement = (payment['movement'] ?? payment['movementType'] ?? '-').toString();
+    final time = _formatEatTime(payment);
+    final amount = (payment['amount'] as num?)?.toDouble() ?? 0;
+    final isReverted = payment['isReverted'] == true;
+
+    return GestureDetector(
+      onTap: () => _openPaymentReceipt(payment),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 12),
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(18),
+          border: Border.all(color: Colors.blueGrey.shade50),
+          boxShadow: [
+            BoxShadow(
+              color: Colors.black.withValues(alpha: 0.03),
+              blurRadius: 8,
+              offset: const Offset(0, 2),
             ),
-          ),
-          const SizedBox(height: 12),
-          Row(
-            children: [
-              Expanded(
-                child: GestureDetector(
-                  onTap: _pickDate,
-                  child: Container(
-                    padding:
-                        const EdgeInsets.symmetric(horizontal: 14, vertical: 14),
-                    decoration: BoxDecoration(
-                      color: BrandColors.background,
-                      borderRadius: BorderRadius.circular(12),
-                      border:
-                          Border.all(color: Colors.blueGrey.shade200),
-                    ),
-                    child: Row(
-                      children: [
-                        const Icon(
-                          Icons.calendar_today,
-                          size: 20,
-                          color: BrandColors.primary,
-                        ),
-                        const SizedBox(width: 10),
-                        Text(
-                          DateFormat('MMM d, yyyy').format(_selectedDate),
-                          style: TextStyle(
-                            fontSize: 15,
-                            fontWeight: FontWeight.w600,
-                            color: BrandColors.textPrimary,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
+          ],
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 48,
+              height: 48,
+              decoration: BoxDecoration(
+                color: const Color(0xFFEEF4FF),
+                borderRadius: BorderRadius.circular(14),
               ),
-              const SizedBox(width: 12),
-              Expanded(
-                child: TextButton(
-                  onPressed: _pickDate,
-                  style: TextButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(vertical: 14),
-                  ),
-                  child: const Text(
-                    'Select Date',
+              child: Icon(
+                isReverted ? Icons.undo : Icons.directions_car_filled,
+                color: BrandColors.primary,
+                size: 24,
+              ),
+            ),
+            const SizedBox(width: 14),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    plate,
                     style: TextStyle(
-                      color: BrandColors.primary,
-                      fontWeight: FontWeight.w700,
+                      fontSize: 16,
+                      fontWeight: FontWeight.w800,
+                      color: Colors.blueGrey.shade900,
+                      letterSpacing: 0.5,
                     ),
                   ),
-                ),
-              ),
-            ],
-          ),
-          const SizedBox(height: 8),
-          if (_selectedDate != null)
-            Text(
-              'Showing ${filteredPayments.length} record(s) for selected date',
-              style: TextStyle(
-                fontSize: 12,
-                color: BrandColors.textSecondary,
+                  const SizedBox(height: 4),
+                  Text(
+                    movement,
+                    style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.blueGrey.shade600,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(time, style: TextStyle(fontSize: 12, color: Colors.blueGrey.shade500)),
+                ],
               ),
             ),
-        ],
+            const SizedBox(width: 14),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+              decoration: BoxDecoration(
+                color: isReverted ? Colors.red.shade50 : const Color(0xFFECFDF0),
+                borderRadius: BorderRadius.circular(999),
+              ),
+              child: Text(
+                '\$${amount.toStringAsFixed(2)}',
+                style: TextStyle(
+                  color: isReverted ? Colors.red.shade700 : Colors.green.shade700,
+                  fontWeight: FontWeight.w800,
+                  fontSize: 14,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPager() {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        OutlinedButton.icon(
+          onPressed: _currentPage > 0 ? () => _changePage(-1) : null,
+          icon: const Icon(Icons.chevron_left),
+          label: const Text('Prev'),
+        ),
+        Text(
+          'Page ${_currentPage + 1} of $pageCount',
+          style: TextStyle(
+            fontWeight: FontWeight.w700,
+            color: Colors.blueGrey.shade800,
+            fontSize: 13,
+          ),
+        ),
+        OutlinedButton.icon(
+          onPressed: _currentPage + 1 < pageCount ? () => _changePage(1) : null,
+          icon: const Icon(Icons.chevron_right),
+          label: const Text('Next'),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildEmptyState() {
+    return Center(
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 32),
+        child: Column(
+          children: [
+            Container(
+              width: 80,
+              height: 80,
+              decoration: BoxDecoration(
+                color: Colors.blueGrey.shade50,
+                shape: BoxShape.circle,
+              ),
+              child: Icon(Icons.receipt_long, size: 36, color: Colors.blueGrey.shade300),
+            ),
+            const SizedBox(height: 16),
+            Text(
+              'No payments found today',
+              style: TextStyle(fontSize: 15, color: Colors.blueGrey.shade500),
+              textAlign: TextAlign.center,
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -893,143 +868,89 @@ class _DashboardPageState extends State<DashboardPage> {
     );
   }
 
-  Widget _buildEmptyState() {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.symmetric(vertical: 32),
-        child: Column(
-          children: [
-            Container(
-              width: 80,
-              height: 80,
-              decoration: BoxDecoration(
-                color: Colors.blueGrey.shade50,
-                shape: BoxShape.circle,
-              ),
-              child: Icon(
-                Icons.receipt_long,
-                size: 36,
-                color: Colors.blueGrey.shade300,
-              ),
-            ),
-            const SizedBox(height: 16),
-            Text(
-              'No payments found for selected date',
-              style: TextStyle(
-                fontSize: 15,
-                color: Colors.blueGrey.shade500,
-              ),
-              textAlign: TextAlign.center,
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildQuickActions() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          'Quick Actions',
-          style: TextStyle(
-            fontSize: 18,
-            fontWeight: FontWeight.w700,
-            color: BrandColors.textPrimary,
-          ),
-        ),
-        const SizedBox(height: 14),
-        Row(
-          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-          children: [
-            _buildQuickAction(
-              icon: Icons.payments,
-              label: 'New Payment',
-              color: BrandColors.primary,
-              onTap: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (_) => const PaymentPage()),
-                ).then((_) => loadDashboard());
-              },
-            ),
-            _buildQuickAction(
-              icon: Icons.receipt_long,
-              label: 'Today\'s Payments',
-              color: Colors.green.shade600,
-              onTap: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                    builder: (_) => TodaysPaymentsPage(
-                      payments: visiblePayments,
-                      selectedDate: _selectedDate,
-                    ),
-                  ),
-                ).then((_) => loadDashboard());
-              },
-            ),
-            _buildQuickAction(
-              icon: Icons.person,
-              label: 'Profile',
-              color: Colors.purple.shade600,
-              onTap: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (_) => const ProfilePage()),
-                );
-              },
-            ),
-            _buildQuickAction(
-              icon: Icons.print,
-              label: 'Printer',
-              color: Colors.teal.shade600,
-              onTap: () {
-                Navigator.push(
-                  context,
-                  MaterialPageRoute(
-                      builder: (_) => const PrinterSettingsPage()),
-                );
-              },
-            ),
-          ],
-        ),
-      ],
-    );
-  }
-
   Widget _buildBottomNavBar() {
     return BottomNavigationBar(
       type: BottomNavigationBarType.fixed,
       backgroundColor: Colors.white,
       selectedItemColor: BrandColors.primary,
       unselectedItemColor: Colors.blueGrey.shade500,
-      selectedLabelStyle:
-          const TextStyle(fontWeight: FontWeight.w700, fontSize: 12),
-      unselectedLabelStyle:
-          const TextStyle(fontWeight: FontWeight.w500, fontSize: 12),
+      selectedLabelStyle: const TextStyle(fontWeight: FontWeight.w700, fontSize: 12),
+      unselectedLabelStyle: const TextStyle(fontWeight: FontWeight.w500, fontSize: 12),
       elevation: 4,
       onTap: _onNavBarTap,
       items: const [
-       
-        BottomNavigationBarItem(
-          icon: Icon(Icons.receipt_long),
-          label: 'Payments',
-        ),
-        BottomNavigationBarItem(
-          icon: Icon(Icons.payments),
-          label: 'New Payment',
-        ),
-        BottomNavigationBarItem(
-          icon: Icon(Icons.person),
-          label: 'Profile',
-        ),
-        BottomNavigationBarItem(
-          icon: Icon(Icons.print),
-          label: 'Printer',
-        ),
+        BottomNavigationBarItem(icon: Icon(Icons.receipt_long), label: 'Payments'),
+        BottomNavigationBarItem(icon: Icon(Icons.payments), label: 'New Payment'),
+        BottomNavigationBarItem(icon: Icon(Icons.person), label: 'Profile'),
+        BottomNavigationBarItem(icon: Icon(Icons.print), label: 'Printer'),
       ],
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final dateStr = DateFormat('EEEE, MMMM d').format(DateTime.now());
+
+    return Scaffold(
+      backgroundColor: BrandColors.background,
+      body: SafeArea(
+        child: loading
+            ? const Center(child: CircularProgressIndicator())
+            : RefreshIndicator(
+                onRefresh: loadDashboard,
+                child: SingleChildScrollView(
+                  physics: const AlwaysScrollableScrollPhysics(),
+                  padding: const EdgeInsets.all(16),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      _buildHeader(dateStr),
+                      const SizedBox(height: 20),
+                      _buildStatCards(),
+                      const SizedBox(height: 24),
+                      Row(
+                        children: [
+                          const Text(
+                            'Today\'s Payments',
+                            style: TextStyle(
+                              fontSize: 16,
+                              fontWeight: FontWeight.w700,
+                              color: BrandColors.textPrimary,
+                            ),
+                          ),
+                          const Spacer(),
+                          TextButton(
+                            onPressed: () {
+                              Navigator.push(
+                                context,
+                                MaterialPageRoute(
+                                  builder: (_) => TodaysPaymentsPage(
+                                    payments: visiblePayments,
+                                    selectedDate: DateTime.now(),
+                                  ),
+                                ),
+                              ).then((_) => loadDashboard());
+                            },
+                            child: const Text('View All'),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+                      if (error != null)
+                        _buildErrorBanner()
+                      else if (visiblePayments.isEmpty)
+                        _buildEmptyState()
+                      else ...[
+                        ...pagedPayments.map(_buildPaymentRow),
+                        const SizedBox(height: 16),
+                        _buildPager(),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+      ),
+      bottomNavigationBar: _buildBottomNavBar(),
     );
   }
 }

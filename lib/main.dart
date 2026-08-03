@@ -19,14 +19,15 @@ class MyApp extends StatelessWidget {
         colorScheme: ColorScheme.fromSeed(
           seedColor: const Color(0xFF0B57D0),
           primary: const Color(0xFF0B57D0),
-          secondary: const Color(0xFFE65100),
+          secondary: const Color(0xFF14B8A6),
+          tertiary: const Color(0xFFE65100),
         ),
-        scaffoldBackgroundColor: const Color(0xFFF4F7FC),
+        scaffoldBackgroundColor: const Color(0xFFF8FAFC),
         appBarTheme: const AppBarTheme(
           centerTitle: false,
           elevation: 0,
-          backgroundColor: Colors.transparent,
-          foregroundColor: Color(0xFF0F172A),
+          backgroundColor: Color(0xFF0B57D0),
+          foregroundColor: Colors.white,
         ),
         inputDecorationTheme: InputDecorationTheme(
           filled: true,
@@ -40,14 +41,35 @@ class MyApp extends StatelessWidget {
           ),
           enabledBorder: OutlineInputBorder(
             borderRadius: BorderRadius.circular(12),
-            borderSide: BorderSide(color: Colors.blueGrey.shade100),
+            borderSide: BorderSide(color: Color(0xFFE2E8F0)),
           ),
         ),
         cardTheme: CardThemeData(
           color: Colors.white,
-          elevation: 2,
+          elevation: 0,
           shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(16),
+            borderRadius: BorderRadius.circular(18),
+            side: const BorderSide(color: Color(0xFFE2E8F0)),
+          ),
+        ),
+        elevatedButtonTheme: ElevatedButtonThemeData(
+          style: ElevatedButton.styleFrom(
+            backgroundColor: const Color(0xFF0B57D0),
+            foregroundColor: Colors.white,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+            padding: const EdgeInsets.symmetric(vertical: 14),
+          ),
+        ),
+        outlinedButtonTheme: OutlinedButtonThemeData(
+          style: OutlinedButton.styleFrom(
+            foregroundColor: const Color(0xFF0B57D0),
+            side: const BorderSide(color: Color(0xFF0B57D0)),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(12),
+            ),
+            padding: const EdgeInsets.symmetric(vertical: 14),
           ),
         ),
       ),

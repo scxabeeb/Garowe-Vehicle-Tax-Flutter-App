@@ -2,7 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../services/session.dart';
 import '../services/api_service.dart';
+import '../utils/receipt_id_formatter.dart';
+import '../widgets/app_bottom_nav.dart';
 import 'dashboard_page.dart';
+import 'invoice_preview_page.dart';
+import 'payment_page.dart';
+import 'printer_settings_page.dart';
+import 'profile_page.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -24,9 +30,8 @@ class TodaysPaymentsPage extends StatefulWidget {
 class _TodaysPaymentsPageState extends State<TodaysPaymentsPage> {
   static const Duration _eatOffset = Duration(hours: 3);
 
-  DateTime? startDate;
-  DateTime? endDate;
   String selectedCollector = 'All';
+  String searchQuery = '';
 
   bool loading = false;
   String? error;
@@ -34,13 +39,20 @@ class _TodaysPaymentsPageState extends State<TodaysPaymentsPage> {
   // For loading payments from the API by date
   DateTime _selectedDate = DateTime.now();
   List<dynamic> _loadedPayments = [];
+  bool _hasLoadedForSelectedDate = false;
+  final Map<String, List<dynamic>> _paymentsByDateCache = {};
   int? _resolvedCollectorId;
 
   @override
   void initState() {
     super.initState();
-    _selectedDate = widget.selectedDate ?? DateTime.now();
+    _selectedDate = DateUtils.dateOnly(DateTime.now());
     _initAndLoad();
+  }
+
+  String _dateKey(DateTime value) {
+    final d = DateUtils.dateOnly(value);
+    return '${d.year.toString().padLeft(4, '0')}-${d.month.toString().padLeft(2, '0')}-${d.day.toString().padLeft(2, '0')}';
   }
 
   Future<void> _initAndLoad() async {
@@ -94,46 +106,6 @@ class _TodaysPaymentsPageState extends State<TodaysPaymentsPage> {
     return null;
   }
 
-  bool _isMyRecord(dynamic payment) {
-    if (payment is! Map<String, dynamic>) return false;
-    if (isAdmin) return true;
-
-    final myId = Session.userId;
-    if (myId != null) {
-      final collectorId = _toInt(payment['collectorId']);
-      final userId = _toInt(payment['userId']);
-      final collectorMap = payment['collector'];
-      final collectorMapId = collectorMap is Map<String, dynamic>
-          ? _toInt(collectorMap['id'])
-          : null;
-
-      if (collectorId == myId || userId == myId || collectorMapId == myId) {
-        return true;
-      }
-    }
-
-    final myUsername = (Session.username ?? '').trim().toLowerCase();
-    if (myUsername.isEmpty) return false;
-
-    final collectorName = (payment['collectorName'] ?? payment['collector'] ?? '')
-        .toString()
-        .trim()
-        .toLowerCase();
-
-    if (collectorName == myUsername) return true;
-
-    final collectorMap = payment['collector'];
-    if (collectorMap is Map<String, dynamic>) {
-      final username = (collectorMap['username'] ?? '')
-          .toString()
-          .trim()
-          .toLowerCase();
-      return username == myUsername;
-    }
-
-    return false;
-  }
-
   String _collectorName(dynamic payment) {
     if (payment is! Map<String, dynamic>) return '-';
 
@@ -166,31 +138,32 @@ class _TodaysPaymentsPageState extends State<TodaysPaymentsPage> {
   List<dynamic> get validPayments =>
       widget.payments.where((p) => p['isReverted'] != true).toList();
 
-  bool _matchesDate(dynamic payment) {
-    if (startDate == null && endDate == null) return true;
-    final parsed = _parseDate(payment);
-    if (parsed == null) return false;
-
-    final d = DateUtils.dateOnly(parsed);
-    if (startDate != null && d.isBefore(DateUtils.dateOnly(startDate!))) {
-      return false;
-    }
-    if (endDate != null && d.isAfter(DateUtils.dateOnly(endDate!))) {
-      return false;
-    }
-    return true;
-  }
-
   bool _matchesCollector(dynamic payment) {
     if (!isAdmin || selectedCollector == 'All') return true;
     return _collectorName(payment) == selectedCollector;
   }
 
+  bool _matchesSearch(dynamic payment) {
+    if (searchQuery.trim().isEmpty) return true;
+    if (payment is! Map<String, dynamic>) return false;
+
+    final query = searchQuery.trim().toLowerCase();
+    final plate = (payment['plate'] ?? payment['plateNumber'] ?? '')
+        .toString()
+        .toLowerCase();
+    final paymentId = (payment['paymentId'] ?? payment['id'] ?? '')
+        .toString()
+        .toLowerCase();
+
+    return plate.contains(query) || paymentId.contains(query);
+  }
+
   List<dynamic> get filteredPayments {
-    final source = _loadedPayments.isNotEmpty ? _loadedPayments : widget.payments;
+    final source = _hasLoadedForSelectedDate ? _loadedPayments : widget.payments;
     return source
         .where((p) => p['isReverted'] != true)
-        .where((p) => _matchesDate(p) && _matchesCollector(p))
+        .where((p) => p is Map<String, dynamic> && _isPaidPayment(p))
+        .where((p) => _matchesCollector(p) && _matchesSearch(p))
         .toList();
   }
 
@@ -203,17 +176,43 @@ class _TodaysPaymentsPageState extends State<TodaysPaymentsPage> {
     return sum;
   }
 
+  int get selectedDateVehicleCount {
+    final plates = <String>{};
+    for (final p in filteredPayments) {
+      final plate = (p['plate'] ?? p['plateNumber'] ?? '').toString().trim();
+      if (plate.isNotEmpty && plate != '-') {
+        plates.add(plate.toUpperCase());
+      }
+    }
+    return plates.length;
+  }
+
   // ── Load payments for a specific date from the API ─────────────
   Future<void> _loadPaymentsForDate(DateTime date) async {
+    final normalizedDate = DateUtils.dateOnly(date);
+    final dateKey = _dateKey(normalizedDate);
+    final cached = _paymentsByDateCache[dateKey];
+
+    if (cached != null) {
+      setState(() {
+        _selectedDate = normalizedDate;
+        _loadedPayments = cached;
+        _hasLoadedForSelectedDate = true;
+        loading = false;
+        error = null;
+        searchQuery = '';
+      });
+      return;
+    }
+
     setState(() {
       loading = true;
       error = null;
-      _selectedDate = date;
-      startDate = null;
-      endDate = null;
+      _selectedDate = normalizedDate;
+      searchQuery = '';
     });
 
-    final targetDate = DateUtils.dateOnly(_toEat(date));
+    final targetDate = DateUtils.dateOnly(_toEat(normalizedDate));
     final collectorId = _resolvedCollectorId;
 
     if (collectorId != null) {
@@ -243,7 +242,9 @@ class _TodaysPaymentsPageState extends State<TodaysPaymentsPage> {
             }).toList();
 
             setState(() {
+              _paymentsByDateCache[dateKey] = matching;
               _loadedPayments = matching;
+              _hasLoadedForSelectedDate = true;
               loading = false;
             });
             return;
@@ -254,49 +255,27 @@ class _TodaysPaymentsPageState extends State<TodaysPaymentsPage> {
       }
     }
 
-    // Fallback to the passed-in payments (today's from dashboard)
+    // Fallback to the passed-in payments filtered to selected date.
+    final fallbackMatching = widget.payments.where((item) {
+      if (item is! Map<String, dynamic>) return false;
+      if (item['isReverted'] == true) return false;
+
+      final parsed = _parseDate(item);
+      if (parsed == null) return false;
+
+      return DateUtils.isSameDay(
+        DateUtils.dateOnly(parsed),
+        targetDate,
+      );
+    }).toList();
+
     setState(() {
-      _loadedPayments = widget.payments;
+      _paymentsByDateCache[dateKey] = fallbackMatching;
+      _loadedPayments = fallbackMatching;
+      _hasLoadedForSelectedDate = true;
       loading = false;
       if (collectorId == null) {
         error = 'Collector ID not available. Please log in again.';
-      }
-    });
-  }
-
-  Future<void> _pickStartDate() async {
-    final now = DateTime.now();
-    final date = await showDatePicker(
-      context: context,
-      initialDate: startDate ?? now,
-      firstDate: DateTime(2020),
-      lastDate: DateTime(2100),
-    );
-
-    if (date == null) return;
-    setState(() {
-      startDate = date;
-      if (endDate != null && endDate!.isBefore(startDate!)) {
-        endDate = null;
-      }
-    });
-  }
-
-  Future<void> _pickEndDate() async {
-    final now = DateTime.now();
-    final date = await showDatePicker(
-      context: context,
-      initialDate: endDate ?? startDate ?? now,
-      firstDate: DateTime(2020),
-      lastDate: DateTime(2100),
-    );
-
-    if (date == null) return;
-    setState(() {
-      if (startDate != null && date.isBefore(startDate!)) {
-        endDate = startDate;
-      } else {
-        endDate = date;
       }
     });
   }
@@ -314,33 +293,86 @@ class _TodaysPaymentsPageState extends State<TodaysPaymentsPage> {
     await _loadPaymentsForDate(date);
   }
 
+  Future<void> _shiftDateByDays(int days) async {
+    final nextDate = DateUtils.dateOnly(_selectedDate.add(Duration(days: days)));
+    await _loadPaymentsForDate(nextDate);
+  }
+
+  Future<void> _loadToday() async {
+    await _loadPaymentsForDate(DateUtils.dateOnly(DateTime.now()));
+  }
+
+  void _onNavBarTap(int index) {
+    switch (index) {
+      case 0:
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => const DashboardPage()),
+        );
+        break;
+      case 1:
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => const PaymentPage()),
+        );
+        break;
+      case 2:
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => const ProfilePage()),
+        );
+        break;
+      case 3:
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(builder: (_) => const PrinterSettingsPage()),
+        );
+        break;
+    }
+  }
+
   @override
   Widget build(BuildContext context) {
-    final sourcePayments =
-        _loadedPayments.isNotEmpty ? _loadedPayments : widget.payments;
+    final sourcePayments = _hasLoadedForSelectedDate ? _loadedPayments : widget.payments;
 
     return Scaffold(
       backgroundColor: BrandColors.background,
       appBar: AppBar(
-        title: Text(
-          isAdmin
-              ? 'All Payments — ${DateFormat('MMM d, yyyy').format(_selectedDate)}'
-              : 'My Payments — ${DateFormat('MMM d, yyyy').format(_selectedDate)}',
-          style: const TextStyle(
-            color: Colors.white,
-            fontWeight: FontWeight.w700,
-            fontSize: 18,
+        flexibleSpace: Container(
+          decoration: const BoxDecoration(
+            gradient: LinearGradient(
+              colors: [BrandColors.primary, BrandColors.primaryDark],
+              begin: Alignment.topLeft,
+              end: Alignment.bottomRight,
+            ),
           ),
         ),
-        backgroundColor: BrandColors.primary,
+        title: Row(
+          children: [
+            ClipRRect(
+              borderRadius: BorderRadius.circular(10),
+              child: Image.asset(
+                'assets/images/Logo.jpeg',
+                width: 28,
+                height: 28,
+                fit: BoxFit.cover,
+              ),
+            ),
+            const SizedBox(width: 10),
+            Text(
+              isAdmin
+                  ? 'All Payments'
+                  : 'My Payments',
+              style: const TextStyle(
+                color: Colors.white,
+                fontWeight: FontWeight.w700,
+                fontSize: 18,
+              ),
+            ),
+          ],
+        ),
         foregroundColor: Colors.white,
         elevation: 0,
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.calendar_today, size: 20),
-            onPressed: _pickPaymentDate,
-          ),
-        ],
       ),
       body: sourcePayments.isEmpty && loading
           ? const Center(child: CircularProgressIndicator())
@@ -368,6 +400,10 @@ class _TodaysPaymentsPageState extends State<TodaysPaymentsPage> {
                 ),
               ],
             ),
+      bottomNavigationBar: AppBottomNav(
+        currentIndex: 0,
+        onTap: _onNavBarTap,
+      ),
     );
   }
 
@@ -386,52 +422,52 @@ class _TodaysPaymentsPageState extends State<TodaysPaymentsPage> {
         runSpacing: 10,
         crossAxisAlignment: WrapCrossAlignment.center,
         children: [
-          // Date picker to view payments for a specific date
-          OutlinedButton.icon(
-            onPressed: _pickPaymentDate,
-            icon: const Icon(Icons.calendar_today, size: 18),
-            label: Text(
-              'Date: ${DateFormat('MMM d, yyyy').format(_selectedDate)}',
+          Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(12),
+              color: const Color(0xFFF8FAFC),
+              border: Border.all(color: BrandColors.border),
             ),
-            style: OutlinedButton.styleFrom(
-              foregroundColor: BrandColors.primary,
-            ),
-          ),
-
-          // Range date filters (today's payments shown by default)
-          OutlinedButton.icon(
-            onPressed: _pickStartDate,
-            icon: const Icon(Icons.date_range, size: 18),
-            label: Text(
-              startDate == null
-                  ? 'Start Date'
-                  : DateFormat('MMM d').format(startDate!),
-            ),
-            style: OutlinedButton.styleFrom(
-              foregroundColor: BrandColors.primary,
-            ),
-          ),
-          OutlinedButton.icon(
-            onPressed: _pickEndDate,
-            icon: const Icon(Icons.event, size: 18),
-            label: Text(
-              endDate == null
-                  ? 'End Date'
-                  : DateFormat('MMM d').format(endDate!),
-            ),
-            style: OutlinedButton.styleFrom(
-              foregroundColor: BrandColors.primary,
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                IconButton(
+                  tooltip: 'Previous day',
+                  onPressed: loading ? null : () => _shiftDateByDays(-1),
+                  icon: const Icon(Icons.chevron_left),
+                  color: BrandColors.primary,
+                ),
+                OutlinedButton.icon(
+                  onPressed: loading ? null : _pickPaymentDate,
+                  icon: const Icon(Icons.calendar_month, size: 18),
+                  label: Text(
+                    DateFormat('EEE, dd MMM yyyy').format(_selectedDate),
+                  ),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: BrandColors.primary,
+                  ),
+                ),
+                IconButton(
+                  tooltip: 'Next day',
+                  onPressed: loading ? null : () => _shiftDateByDays(1),
+                  icon: const Icon(Icons.chevron_right),
+                  color: BrandColors.primary,
+                ),
+              ],
             ),
           ),
 
-          if (startDate != null || endDate != null)
-            TextButton(
-              onPressed: () => setState(() {
-                startDate = null;
-                endDate = null;
-              }),
-              child: const Text('Clear Dates'),
-            ),
+          ActionChip(
+            label: const Text('Yesterday'),
+            onPressed: loading ? null : () => _shiftDateByDays(-1),
+            avatar: const Icon(Icons.history, size: 16),
+          ),
+          ActionChip(
+            label: const Text('Today'),
+            onPressed: loading ? null : _loadToday,
+            avatar: const Icon(Icons.today, size: 16),
+          ),
 
           if (isAdmin)
             DropdownButton<String>(
@@ -448,12 +484,39 @@ class _TodaysPaymentsPageState extends State<TodaysPaymentsPage> {
                 if (value == null) return;
                 setState(() => selectedCollector = value);
               },
-              style: TextStyle(
+              style: const TextStyle(
                 color: BrandColors.primary,
                 fontWeight: FontWeight.w600,
               ),
               dropdownColor: Colors.white,
             ),
+
+          SizedBox(
+            width: 320,
+            child: TextField(
+              decoration: InputDecoration(
+                hintText: 'Search by plate or payment ID',
+                prefixIcon: const Icon(Icons.search, size: 20),
+                suffixIcon: searchQuery.isEmpty
+                    ? null
+                    : IconButton(
+                        onPressed: () {
+                          setState(() => searchQuery = '');
+                        },
+                        icon: const Icon(Icons.clear, size: 18),
+                      ),
+                isDense: true,
+                filled: true,
+                fillColor: Colors.white,
+                border: OutlineInputBorder(
+                  borderRadius: BorderRadius.circular(10),
+                ),
+              ),
+              onChanged: (value) {
+                setState(() => searchQuery = value);
+              },
+            ),
+          ),
         ],
       ),
     );
@@ -465,21 +528,53 @@ class _TodaysPaymentsPageState extends State<TodaysPaymentsPage> {
       width: double.infinity,
       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
       color: Colors.white,
-      child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            '${filtered.length} record${filtered.length != 1 ? 's' : ''}',
-            style: TextStyle(
+            'Details for ${DateFormat('EEEE, dd MMM yyyy').format(_selectedDate)}',
+            style: const TextStyle(
+              fontSize: 13,
+              fontWeight: FontWeight.w700,
+              color: BrandColors.textSecondary,
+            ),
+          ),
+          const SizedBox(height: 8),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text(
+                'Vehicles: $selectedDateVehicleCount',
+                style: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                  color: BrandColors.primary,
+                ),
+              ),
+              Text(
+                'Payments: ${filtered.length}',
+                style: const TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                  color: BrandColors.primary,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          Text(
+            '${filtered.length} record${filtered.length != 1 ? 's' : ''} found',
+            style: const TextStyle(
               fontSize: 13,
               fontWeight: FontWeight.w600,
               color: BrandColors.primary,
             ),
           ),
+          const SizedBox(height: 4),
           Text(
             'Total: \$${totalCollected.toStringAsFixed(2)}',
             style: TextStyle(
-              fontSize: 15,
+              fontSize: 16,
               fontWeight: FontWeight.w800,
               color: Colors.green.shade700,
             ),
@@ -496,6 +591,7 @@ class _TodaysPaymentsPageState extends State<TodaysPaymentsPage> {
     final time = _formatEatTime(p);
     final amount = (p['amount'] as num?)?.toDouble() ?? 0;
     final isReverted = p['isReverted'] == true;
+    final isPaid = p is Map<String, dynamic> ? _isPaidPayment(p) : false;
     final collector = _collectorName(p);
 
     return Container(
@@ -507,6 +603,7 @@ class _TodaysPaymentsPageState extends State<TodaysPaymentsPage> {
         border: Border.all(color: Colors.blueGrey.shade50),
       ),
       child: ListTile(
+        onTap: () => _openPaymentReceipt(p),
         contentPadding: EdgeInsets.zero,
         leading: Container(
           width: 44,
@@ -523,14 +620,14 @@ class _TodaysPaymentsPageState extends State<TodaysPaymentsPage> {
         ),
         title: Text(
           plate,
-          style: TextStyle(
+          style: const TextStyle(
             fontWeight: FontWeight.w800,
             color: BrandColors.textPrimary,
           ),
         ),
         subtitle: Text(
-          '$movement • $time\nCollector: $collector',
-          style: TextStyle(
+          '$movement • $time\nCollector: $collector\nStatus: ${isPaid ? 'Paid' : 'Pending'}',
+          style: const TextStyle(
             fontSize: 12,
             color: BrandColors.textSecondary,
           ),
@@ -559,6 +656,244 @@ class _TodaysPaymentsPageState extends State<TodaysPaymentsPage> {
     );
   }
 
+  String _readScalarString(
+    Map<String, dynamic> map,
+    List<String> keys, {
+    String fallback = '',
+  }) {
+    for (final key in keys) {
+      final value = map[key];
+      if (value == null) continue;
+      final text = value.toString().trim();
+      if (text.isNotEmpty && text.toLowerCase() != 'null') {
+        return text;
+      }
+    }
+    return fallback;
+  }
+
+  String _readDeepScalarString(
+    Map<String, dynamic> map,
+    List<String> keys, {
+    String fallback = '',
+  }) {
+    final direct = _readScalarString(map, keys);
+    if (direct.isNotEmpty) {
+      return direct;
+    }
+
+    for (final containerKey in ['receipt', 'data', 'result', 'payment']) {
+      final nested = map[containerKey];
+      if (nested is! Map<String, dynamic>) continue;
+      final nestedValue = _readScalarString(nested, keys);
+      if (nestedValue.isNotEmpty) {
+        return nestedValue;
+      }
+
+      final nestedReceipt = nested['receipt'];
+      if (nestedReceipt is Map<String, dynamic>) {
+        final nestedReceiptValue = _readScalarString(nestedReceipt, keys);
+        if (nestedReceiptValue.isNotEmpty) {
+          return nestedReceiptValue;
+        }
+      }
+    }
+
+    return fallback;
+  }
+
+  bool _asBool(dynamic value) {
+    if (value is bool) return value;
+    if (value is num) return value != 0;
+    if (value is String) {
+      final normalized = value.trim().toLowerCase();
+      return normalized == 'true' ||
+          normalized == '1' ||
+          normalized == 'paid' ||
+          normalized == 'success' ||
+          normalized == 'completed';
+    }
+    return false;
+  }
+
+  bool _isPaidPayment(Map<String, dynamic> payment) {
+    final status = _readDeepScalarString(
+      payment,
+      ['status', 'paymentStatus', 'state'],
+      fallback: '',
+    ).toLowerCase();
+
+    if (status == 'paid' || status == 'completed') {
+      return true;
+    }
+
+    final deepIsPaid = _asBool(payment['isPaid']) ||
+        _asBool(payment['paid']) ||
+        _asBool((payment['receipt'] as Map<String, dynamic>?)?['isPaid']) ||
+        _asBool((payment['receipt'] as Map<String, dynamic>?)?['paid']);
+
+    if (deepIsPaid) {
+      return true;
+    }
+
+    final paidAtText =
+        _readDeepScalarString(payment, ['paidAt', 'paidAtUtc']);
+    if (paidAtText.isNotEmpty) {
+      return true;
+    }
+
+    return false;
+  }
+
+  Map<String, dynamic> _receiptPayloadOnly(Map<String, dynamic> payload) {
+    final receipt = payload['receipt'];
+    if (receipt is Map<String, dynamic>) return receipt;
+    final data = payload['data'];
+    if (data is Map<String, dynamic>) return data;
+    final result = payload['result'];
+    if (result is Map<String, dynamic>) return result;
+    return payload;
+  }
+
+  Future<Map<String, dynamic>?> _loadReceipt(int paymentId) async {
+    final res = await http
+        .get(Uri.parse('${ApiService.baseUrl}/payments/$paymentId/receipt'))
+        .timeout(const Duration(seconds: 20));
+
+    if (res.statusCode != 200) return null;
+    final decoded = jsonDecode(res.body);
+    if (decoded is Map<String, dynamic>) {
+      final receipt = decoded['receipt'];
+      if (receipt is Map<String, dynamic>) return receipt;
+      return decoded;
+    }
+    return null;
+  }
+
+  Future<void> _openPaymentReceipt(dynamic payment) async {
+    if (payment is! Map<String, dynamic>) return;
+
+    final invoiceId = _readScalarString(
+      payment,
+      [
+        'invoiceId',
+        'invoiceNumber',
+        'invoice_no',
+        'invoiceNo',
+        'invoice',
+      ],
+    );
+    final paymentId = _readScalarString(
+      payment,
+      ['paymentId', 'payment_id', 'paymentID', 'id'],
+    );
+    final billNo = _readScalarString(
+      payment,
+      ['golisBillNo', 'transactionId', 'billNo', 'referenceNumber', 'bill_no'],
+    );
+    final rawShortCode = _readScalarString(
+      payment,
+      ['shortCode', 'short_code'],
+      fallback: '',
+    );
+    final shortCode = ReceiptIdFormatter.resolveShortCode(
+      paymentId,
+      provided: rawShortCode,
+    );
+    final plate = _readScalarString(payment, ['plate', 'plateNumber', 'plate_number'], fallback: '-');
+    final owner = _readScalarString(payment, ['owner', 'ownerName', 'owner_name'], fallback: '-');
+    final movement = _readScalarString(payment, ['movement', 'movementType', 'movement_type'], fallback: '-');
+    final amount = (payment['amount'] as num?)?.toDouble() ?? 0;
+    final quantity = (_toInt(payment['quantity']) ?? 1).clamp(1, 999999);
+    final unitAmount = quantity > 0 ? amount / quantity : amount;
+    final paidAtFallback = _parseDate(payment) ?? _toEat(DateTime.now());
+
+    final parsedPaymentId = int.tryParse(paymentId);
+    final receipt = (parsedPaymentId != null && parsedPaymentId > 0)
+        ? await _loadReceipt(parsedPaymentId)
+        : null;
+    if (receipt == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('Unable to load official backend receipt IDs.')),
+        );
+      }
+      return;
+    }
+    final receiptSource = _receiptPayloadOnly(receipt);
+
+    final resolvedInvoiceId = _readScalarString(
+      receiptSource,
+      [
+        'invoiceId',
+        'invoiceNumber',
+        'invoice_no',
+        'invoiceNo',
+        'invoice',
+      ],
+      fallback: invoiceId,
+    );
+    final resolvedPaymentId = _readScalarString(
+      receiptSource,
+      ['paymentId', 'payment_id', 'paymentID', 'id'],
+      fallback: paymentId,
+    );
+    final resolvedBillNo = _readScalarString(
+      receiptSource,
+      [
+        'receiptId',
+        'receiptNumber',
+        'golisBillNo',
+        'transactionId',
+        'billNo',
+        'referenceNumber',
+        'bill_no',
+        'refNo',
+        'refId',
+      ],
+      fallback: billNo,
+    );
+    final resolvedShortCodeRaw = _readScalarString(
+      receiptSource,
+      ['shortCode', 'short_code'],
+      fallback: shortCode,
+    );
+    final resolvedShortCode = ReceiptIdFormatter.resolveShortCode(
+      resolvedPaymentId,
+      provided: resolvedShortCodeRaw,
+    );
+    final paidAt = _parseDate(receiptSource) ?? paidAtFallback;
+    final isPaid = _isPaidPayment(receiptSource) || _isPaidPayment(payment);
+    final safeBillNo =
+      resolvedBillNo.trim().toLowerCase() == resolvedInvoiceId.trim().toLowerCase()
+        ? ''
+        : resolvedBillNo;
+
+    if (!mounted) return;
+
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => InvoicePreviewPage(
+          invoiceNumber: resolvedInvoiceId,
+          billNo: safeBillNo,
+          paymentId: resolvedPaymentId,
+          shortCode: resolvedShortCode,
+          plateNumber: plate,
+          ownerName: owner,
+          movementName: movement,
+          quantity: quantity,
+          unitAmount: unitAmount,
+          totalAmount: amount,
+          collectorName: _collectorName(payment),
+          paidAt: paidAt,
+          isPaid: isPaid,
+          canRecordPayment: false,
+        ),
+      ),
+    );
+  }
+
   Widget _buildEmptyState() {
     return Center(
       child: Padding(
@@ -581,8 +916,8 @@ class _TodaysPaymentsPageState extends State<TodaysPaymentsPage> {
             ),
             const SizedBox(height: 16),
             Text(
-              'No payments found for ${DateFormat('MMM d, yyyy').format(_selectedDate)}',
-              style: TextStyle(
+              'No collected data for ${DateFormat('MMM d, yyyy').format(_selectedDate)}',
+              style: const TextStyle(
                 fontSize: 15,
                 color: BrandColors.textSecondary,
               ),
