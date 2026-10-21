@@ -141,7 +141,14 @@ class _TodaysPaymentsPageState extends State<TodaysPaymentsPage> {
     }
 
     final collector = payment['collector'];
+    if (collector is String && collector.trim().isNotEmpty) {
+      return collector.trim();
+    }
     if (collector is Map<String, dynamic>) {
+      final fullName = collector['fullName'];
+      if (fullName is String && fullName.trim().isNotEmpty) {
+        return fullName.trim();
+      }
       final username = collector['username'];
       if (username is String && username.trim().isNotEmpty) {
         return username.trim();
