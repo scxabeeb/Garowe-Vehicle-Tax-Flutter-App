@@ -103,7 +103,14 @@ class _DashboardPageState extends State<DashboardPage> {
     final myUsername = (Session.username ?? '').trim().toLowerCase();
     if (myUsername.isEmpty) return false;
 
-    final collectorName = (payment['collectorName'] ?? payment['collector'] ?? '')
+    // `collector` holds the username; `collectorName` may be the full name.
+    final collectorField = payment['collector'];
+    if (collectorField is String &&
+        collectorField.trim().toLowerCase() == myUsername) {
+      return true;
+    }
+
+    final collectorName = (payment['collectorName'] ?? '')
         .toString()
         .trim()
         .toLowerCase();
