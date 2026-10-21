@@ -7,6 +7,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../services/api_service.dart';
 import '../services/session.dart';
+import '../theme/brand_theme.dart';
 import '../utils/receipt_id_formatter.dart';
 import 'invoice_preview_page.dart';
 import 'login_page.dart';
@@ -14,17 +15,6 @@ import 'payment_page.dart';
 import 'printer_settings_page.dart';
 import 'profile_page.dart';
 import 'todays_payments_page.dart';
-
-class BrandColors {
-  static const Color primary = Color(0xFF0B57D0);
-  static const Color primaryDark = Color(0xFF1E40AF);
-  static const Color secondary = Color(0xFF14B8A6);
-  static const Color accent = Color(0xFFE65100);
-  static const Color background = Color(0xFFF8FAFC);
-  static const Color textPrimary = Color(0xFF0F172A);
-  static const Color textSecondary = Color(0xFF64748B);
-  static const Color border = Color(0xFFE2E8F0);
-}
 
 class DashboardPage extends StatefulWidget {
   const DashboardPage({super.key});
@@ -60,6 +50,28 @@ class _DashboardPageState extends State<DashboardPage> {
   }
 
   bool get isAdmin => (Session.role ?? '').toLowerCase() == 'admin';
+
+  Future<String?> _getAccessToken() async {
+    if (Session.accessToken != null && Session.accessToken!.isNotEmpty) {
+      return Session.accessToken;
+    }
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString('accessToken');
+    if (token != null && token.isNotEmpty) {
+      Session.accessToken = token;
+      return token;
+    }
+    return null;
+  }
+
+  Future<Map<String, String>> _authHeaders() async {
+    final headers = <String, String>{'Accept': 'application/json'};
+    final token = await _getAccessToken();
+    if (token != null) {
+      headers['Authorization'] = 'Bearer $token';
+    }
+    return headers;
+  }
 
   DateTime _toEat(DateTime input) => input.toUtc().add(_eatOffset);
 
@@ -298,8 +310,12 @@ class _DashboardPageState extends State<DashboardPage> {
 
     try {
       final res = await http
-          .get(Uri.parse('${ApiService.baseUrl}/Dashboard'))
+          .get(
+            Uri.parse('${ApiService.baseUrl}/Dashboard'),
+            headers: await _authHeaders(),
+          )
           .timeout(const Duration(seconds: 20));
+
 
       if (res.statusCode != 200) {
         setState(() {
@@ -568,20 +584,20 @@ class _DashboardPageState extends State<DashboardPage> {
             const SizedBox(height: 8),
             Text(
               title,
-              style: TextStyle(
+              style: const TextStyle(
                 fontSize: 13,
                 fontWeight: FontWeight.w600,
-                color: Colors.blueGrey.shade600,
+                color: BrandColors.textSecondary,
                 letterSpacing: 0.5,
               ),
             ),
             const SizedBox(height: 4),
             Text(
               value,
-              style: TextStyle(
+              style: const TextStyle(
                 fontSize: 20,
                 fontWeight: FontWeight.w800,
-                color: Colors.blueGrey.shade900,
+                color: BrandColors.textPrimary,
                 height: 1.1,
               ),
             ),
@@ -589,7 +605,7 @@ class _DashboardPageState extends State<DashboardPage> {
               const SizedBox(height: 2),
               Text(
                 subtitle,
-                style: TextStyle(fontSize: 12, color: Colors.blueGrey.shade500),
+                style: const TextStyle(fontSize: 12, color: BrandColors.textSecondary),
               ),
             ],
           ],
@@ -720,9 +736,9 @@ class _DashboardPageState extends State<DashboardPage> {
           border: Border.all(color: Colors.blueGrey.shade50),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withValues(alpha: 0.03),
-              blurRadius: 8,
-              offset: const Offset(0, 2),
+              color: BrandColors.primary.withValues(alpha: 0.05),
+              blurRadius: 12,
+              offset: const Offset(0, 4),
             ),
           ],
         ),
@@ -748,20 +764,20 @@ class _DashboardPageState extends State<DashboardPage> {
                 children: [
                   Text(
                     plate,
-                    style: TextStyle(
+                    style: const TextStyle(
                       fontSize: 16,
                       fontWeight: FontWeight.w800,
-                      color: Colors.blueGrey.shade900,
+                      color: BrandColors.textPrimary,
                       letterSpacing: 0.5,
                     ),
                   ),
                   const SizedBox(height: 4),
                   Text(
                     movement,
-                    style: TextStyle(
+                    style: const TextStyle(
                       fontSize: 14,
                       fontWeight: FontWeight.w600,
-                      color: Colors.blueGrey.shade600,
+                      color: BrandColors.textSecondary,
                     ),
                   ),
                   const SizedBox(height: 2),

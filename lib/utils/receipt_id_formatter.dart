@@ -40,6 +40,28 @@ class ReceiptIdFormatter {
     return trimValue(provided ?? '');
   }
 
+  /// Extracts the first integer found inside an identifier string.
+  /// For example "INV-42", "payment_100", "RC-2024-7" all yield 42 / 100 / 7.
+  /// Returns null when no digits are present.
+  static int? extractNumericId(dynamic value) {
+    if (value == null) return null;
+    if (value is int) return value;
+    if (value is num) return value.toInt();
+    if (value is String) {
+      final trimmed = value.trim();
+      if (trimmed.isEmpty) return null;
+      final direct = int.tryParse(trimmed);
+      if (direct != null) return direct;
+      final match = RegExp(r'\d+').firstMatch(trimmed);
+      if (match != null) {
+        final parsed = int.tryParse(match.group(0)!);
+        if (parsed != null && parsed > 0) return parsed;
+      }
+    }
+    return null;
+  }
+
+
   static bool hasValue(String value) => value.trim().isNotEmpty;
 
   static String trimValue(String value) {

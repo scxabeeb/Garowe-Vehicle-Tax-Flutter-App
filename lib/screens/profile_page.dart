@@ -3,6 +3,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../services/api_service.dart';
 import '../services/session.dart';
+import '../theme/brand_theme.dart';
 import '../widgets/app_bottom_nav.dart';
 import 'dashboard_page.dart';
 import 'login_page.dart';
@@ -134,32 +135,8 @@ class _ProfilePageState extends State<ProfilePage> {
     final initial = username.isNotEmpty ? username.substring(0, 1).toUpperCase() : 'U';
 
     return Scaffold(
-      appBar: AppBar(
-        flexibleSpace: Container(
-          decoration: const BoxDecoration(
-            gradient: LinearGradient(
-              colors: [Color(0xFF0B57D0), Color(0xFF1E40AF)],
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-            ),
-          ),
-        ),
-        title: Row(
-          children: [
-            ClipRRect(
-              borderRadius: BorderRadius.circular(10),
-              child: Image.asset(
-                'assets/images/Logo.jpeg',
-                width: 28,
-                height: 28,
-                fit: BoxFit.cover,
-              ),
-            ),
-            const SizedBox(width: 10),
-            const Text('Profile'),
-          ],
-        ),
-      ),
+      backgroundColor: BrandColors.background,
+      appBar: buildBrandAppBar(title: 'Profile'),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16),
         child: Column(
@@ -176,7 +153,7 @@ class _ProfilePageState extends State<ProfilePage> {
                 borderRadius: BorderRadius.circular(20),
                 boxShadow: [
                   BoxShadow(
-                    color: Colors.blueGrey.withOpacity(0.12),
+                    color: Colors.blueGrey.withValues(alpha: 0.12),
                     blurRadius: 16,
                     offset: const Offset(0, 8),
                   ),

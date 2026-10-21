@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import '../services/session.dart';
 import '../services/api_service.dart';
+import '../theme/brand_theme.dart';
 import '../utils/receipt_id_formatter.dart';
 import '../widgets/app_bottom_nav.dart';
 import 'dashboard_page.dart';
@@ -67,7 +68,32 @@ class _TodaysPaymentsPageState extends State<TodaysPaymentsPage> {
 
   bool get isAdmin => (Session.role ?? '').toLowerCase() == 'admin';
 
+  Future<String?> _getAccessToken() async {
+    if (Session.accessToken != null && Session.accessToken!.isNotEmpty) {
+      return Session.accessToken;
+    }
+
+    final prefs = await SharedPreferences.getInstance();
+    final token = prefs.getString('accessToken');
+    if (token != null && token.isNotEmpty) {
+      Session.accessToken = token;
+      return token;
+    }
+
+    return null;
+  }
+
+  Future<Map<String, String>> _authHeaders() async {
+    final headers = <String, String>{'Accept': 'application/json'};
+    final token = await _getAccessToken();
+    if (token != null) {
+      headers['Authorization'] = 'Bearer $token';
+    }
+    return headers;
+  }
+
   DateTime _toEat(DateTime input) => input.toUtc().add(_eatOffset);
+
 
   DateTime? _parseDate(dynamic payment) {
     if (payment is! Map<String, dynamic>) return null;
@@ -215,11 +241,41 @@ class _TodaysPaymentsPageState extends State<TodaysPaymentsPage> {
     final targetDate = DateUtils.dateOnly(_toEat(normalizedDate));
     final collectorId = _resolvedCollectorId;
 
+    // For today, always use the payments passed from the Dashboard so the
+    // totals match exactly.  Avoid a separate API call that might return
+    // different filtering or fail due to missing auth.
+    final isToday = DateUtils.isSameDay(targetDate, DateUtils.dateOnly(_toEat(DateTime.now())));
+    if (isToday) {
+      final todayMatching = widget.payments.where((item) {
+        if (item is! Map<String, dynamic>) return false;
+        if (item['isReverted'] == true) return false;
+
+        final parsed = _parseDate(item);
+        if (parsed == null) return false;
+
+        return DateUtils.isSameDay(
+          DateUtils.dateOnly(parsed),
+          targetDate,
+        );
+      }).toList();
+
+      setState(() {
+        _paymentsByDateCache[dateKey] = todayMatching;
+        _loadedPayments = todayMatching;
+        _hasLoadedForSelectedDate = true;
+        loading = false;
+        error = null;
+      });
+      return;
+    }
+
     if (collectorId != null) {
       try {
+        final headers = await _authHeaders();
         final res = await http
             .get(
               Uri.parse('${ApiService.baseUrl}/payments/collector/$collectorId'),
+              headers: headers,
             )
             .timeout(const Duration(seconds: 20));
 
@@ -280,6 +336,7 @@ class _TodaysPaymentsPageState extends State<TodaysPaymentsPage> {
     });
   }
 
+
   // ── Pick a specific date to view payments ──────────────────────
   Future<void> _pickPaymentDate() async {
     final date = await showDatePicker(
@@ -337,42 +394,8 @@ class _TodaysPaymentsPageState extends State<TodaysPaymentsPage> {
 
     return Scaffold(
       backgroundColor: BrandColors.background,
-      appBar: AppBar(
-        flexibleSpace: Container(
-          decoration: const BoxDecoration(
-            gradient: LinearGradient(
-              colors: [BrandColors.primary, BrandColors.primaryDark],
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-            ),
-          ),
-        ),
-        title: Row(
-          children: [
-            ClipRRect(
-              borderRadius: BorderRadius.circular(10),
-              child: Image.asset(
-                'assets/images/Logo.jpeg',
-                width: 28,
-                height: 28,
-                fit: BoxFit.cover,
-              ),
-            ),
-            const SizedBox(width: 10),
-            Text(
-              isAdmin
-                  ? 'All Payments'
-                  : 'My Payments',
-              style: const TextStyle(
-                color: Colors.white,
-                fontWeight: FontWeight.w700,
-                fontSize: 18,
-              ),
-            ),
-          ],
-        ),
-        foregroundColor: Colors.white,
-        elevation: 0,
+      appBar: buildBrandAppBar(
+        title: isAdmin ? 'All Payments' : 'My Payments',
       ),
       body: sourcePayments.isEmpty && loading
           ? const Center(child: CircularProgressIndicator())
@@ -755,20 +778,22 @@ class _TodaysPaymentsPageState extends State<TodaysPaymentsPage> {
     return payload;
   }
 
+  /// Loads the official backend receipt for the given numeric payment id.
+  /// Uses the authenticated ApiService so requests that require a token
+  /// do not fail with 401.
   Future<Map<String, dynamic>?> _loadReceipt(int paymentId) async {
-    final res = await http
-        .get(Uri.parse('${ApiService.baseUrl}/payments/$paymentId/receipt'))
-        .timeout(const Duration(seconds: 20));
+    final token = await _getAccessToken();
+    final response = await ApiService.getPaymentReceipt(
+      paymentId,
+      accessToken: token,
+    );
+    if (response == null) return null;
 
-    if (res.statusCode != 200) return null;
-    final decoded = jsonDecode(res.body);
-    if (decoded is Map<String, dynamic>) {
-      final receipt = decoded['receipt'];
-      if (receipt is Map<String, dynamic>) return receipt;
-      return decoded;
-    }
-    return null;
+    final receipt = response['receipt'];
+    if (receipt is Map<String, dynamic>) return receipt;
+    return response;
   }
+
 
   Future<void> _openPaymentReceipt(dynamic payment) async {
     if (payment is! Map<String, dynamic>) return;
@@ -808,9 +833,19 @@ class _TodaysPaymentsPageState extends State<TodaysPaymentsPage> {
     final unitAmount = quantity > 0 ? amount / quantity : amount;
     final paidAtFallback = _parseDate(payment) ?? _toEat(DateTime.now());
 
-    final parsedPaymentId = int.tryParse(paymentId);
-    final receipt = (parsedPaymentId != null && parsedPaymentId > 0)
-        ? await _loadReceipt(parsedPaymentId)
+    // The receipt ID may be the same as the invoice ID (a string like
+    // "INV-42") which cannot be parsed directly.  Try several strategies
+    // to find the numeric payment ID from the backend.
+    int? lookupId = ReceiptIdFormatter.extractNumericId(paymentId);
+    if ((lookupId == null || lookupId <= 0) && payment['id'] != null) {
+      lookupId = ReceiptIdFormatter.extractNumericId(payment['id']);
+    }
+    if ((lookupId == null || lookupId <= 0) && payment['paymentId'] != null) {
+      lookupId = ReceiptIdFormatter.extractNumericId(payment['paymentId']);
+    }
+
+    final receipt = (lookupId != null && lookupId > 0)
+        ? await _loadReceipt(lookupId)
         : null;
     if (receipt == null) {
       if (mounted) {
@@ -889,10 +924,12 @@ class _TodaysPaymentsPageState extends State<TodaysPaymentsPage> {
           paidAt: paidAt,
           isPaid: isPaid,
           canRecordPayment: false,
+          canPrintInvoice: isAdmin,
         ),
       ),
     );
   }
+
 
   Widget _buildEmptyState() {
     return Center(

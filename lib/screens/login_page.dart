@@ -3,6 +3,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../services/api_service.dart';
 import '../services/session.dart';
+import '../theme/brand_theme.dart';
 import 'dashboard_page.dart';
 
 class LoginPage extends StatefulWidget {
@@ -95,7 +96,7 @@ class _LoginPageState extends State<LoginPage> {
           gradient: LinearGradient(
             begin: Alignment.topCenter,
             end: Alignment.bottomCenter,
-            colors: [Color(0xFFE8F0FF), Color(0xFFF7F9FD)],
+            colors: [Color(0xFFDCEBFF), BrandColors.background],
           ),
         ),
         child: SafeArea(
@@ -130,7 +131,7 @@ class _LoginPageState extends State<LoginPage> {
                           style: TextStyle(
                             fontSize: 22,
                             fontWeight: FontWeight.w800,
-                            color: Color(0xFF0F172A),
+                            color: BrandColors.textPrimary,
                           ),
                         ),
                         const SizedBox(height: 6),

@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:unified_esc_pos_printer/unified_esc_pos_printer.dart';
 
 import '../services/esc_pos_printer_service.dart';
+import '../theme/brand_theme.dart';
 import '../widgets/app_bottom_nav.dart';
 import 'dashboard_page.dart';
 import 'payment_page.dart';
@@ -162,32 +163,8 @@ class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      appBar: AppBar(
-        flexibleSpace: Container(
-          decoration: const BoxDecoration(
-            gradient: LinearGradient(
-              colors: [Color(0xFF0B57D0), Color(0xFF1E40AF)],
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-            ),
-          ),
-        ),
-        title: Row(
-          children: [
-            ClipRRect(
-              borderRadius: BorderRadius.circular(10),
-              child: Image.asset(
-                'assets/images/Logo.jpeg',
-                width: 28,
-                height: 28,
-                fit: BoxFit.cover,
-              ),
-            ),
-            const SizedBox(width: 10),
-            const Text('Printer Settings'),
-          ],
-        ),
-      ),
+      backgroundColor: BrandColors.background,
+      appBar: buildBrandAppBar(title: 'Printer Settings'),
       body: _loading
           ? const Center(child: CircularProgressIndicator())
           : ListView(
@@ -206,7 +183,7 @@ class _PrinterSettingsPageState extends State<PrinterSettingsPage> {
                         ),
                         const SizedBox(height: 10),
                         DropdownButtonFormField<int>(
-                          value: _paperWidthMm,
+                          initialValue: _paperWidthMm,
                           items: const [
                             DropdownMenuItem(value: 80, child: Text('80mm (recommended)')),
                             DropdownMenuItem(value: 58, child: Text('58mm')),

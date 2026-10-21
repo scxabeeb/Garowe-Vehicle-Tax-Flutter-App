@@ -9,6 +9,7 @@ import 'package:printing/printing.dart';
 import 'package:unified_esc_pos_printer/unified_esc_pos_printer.dart';
 
 import '../services/esc_pos_printer_service.dart';
+import '../theme/brand_theme.dart';
 import '../utils/receipt_id_formatter.dart';
 import '../widgets/app_bottom_nav.dart';
 import 'dashboard_page.dart';
@@ -31,9 +32,11 @@ class InvoicePreviewPage extends StatefulWidget {
   final DateTime paidAt;
   final bool isPaid;
   final bool canRecordPayment;
+  final bool canPrintInvoice;
   final Future<Map<String, String>?> Function()? onRecordPayment;
   final Future<Map<String, String>?> Function()? onRefreshPaymentStatus;
   final bool autoPrintWhenPaid;
+
 
   const InvoicePreviewPage({
     super.key,
@@ -51,7 +54,9 @@ class InvoicePreviewPage extends StatefulWidget {
     required this.paidAt,
     required this.isPaid,
     required this.canRecordPayment,
+    this.canPrintInvoice = false,
     this.onRecordPayment,
+
     this.onRefreshPaymentStatus,
     this.autoPrintWhenPaid = false,
   });
@@ -358,7 +363,8 @@ class _InvoicePreviewPageState extends State<InvoicePreviewPage> {
     final paymentId = ReceiptIdFormatter.displayPaymentId(_paymentId);
 
     return Scaffold(
-      appBar: AppBar(title: const Text('Receipt Preview')),
+      backgroundColor: BrandColors.background,
+      appBar: buildBrandAppBar(title: 'Receipt Preview'),
       body: SingleChildScrollView(
         padding: const EdgeInsets.all(16),
         child: Card(
@@ -366,7 +372,7 @@ class _InvoicePreviewPageState extends State<InvoicePreviewPage> {
           color: Colors.white,
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(20),
-            side: const BorderSide(color: Color(0xFFE2E8F0)),
+            side: const BorderSide(color: BrandColors.border),
           ),
           child: Padding(
             padding: const EdgeInsets.all(16),
@@ -393,10 +399,14 @@ class _InvoicePreviewPageState extends State<InvoicePreviewPage> {
                             'Garowe Local Government',
                             style: TextStyle(
                               fontSize: 20,
-                              fontWeight: FontWeight.bold,
+                              fontWeight: FontWeight.w800,
+                              color: BrandColors.textPrimary,
                             ),
                           ),
-                          Text('Vehicle Tax Receipt'),
+                          Text(
+                            'Vehicle Tax Receipt',
+                            style: TextStyle(color: BrandColors.textSecondary),
+                          ),
                         ],
                       ),
                     ),
@@ -497,19 +507,28 @@ class _InvoicePreviewPageState extends State<InvoicePreviewPage> {
                             child: CircularProgressIndicator(strokeWidth: 2),
                           )
                         : const Icon(Icons.print),
-                    label: Text(_printingDirect ? 'PRINTING...' : 'Print Receipt'),
+                    label: Text(
+                      _printingDirect
+                          ? 'PRINTING...'
+                          : widget.canPrintInvoice
+                              ? 'Print Invoice'
+                              : 'Print Receipt',
+                    ),
                   ),
                 ),
-                const SizedBox(height: 10),
-                SizedBox(
-                  width: double.infinity,
-                  child: OutlinedButton.icon(
-                    onPressed: _saveAsPdf,
-                    icon: const Icon(Icons.picture_as_pdf),
-                    label: const Text('Save as PDF'),
+                if (widget.canPrintInvoice) ...[
+                  const SizedBox(height: 10),
+                  SizedBox(
+                    width: double.infinity,
+                    child: OutlinedButton.icon(
+                      onPressed: _saveAsPdf,
+                      icon: const Icon(Icons.picture_as_pdf),
+                      label: const Text('Save as PDF'),
+                    ),
                   ),
-                ),
+                ],
               ],
+
             ),
           ),
         ),

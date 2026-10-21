@@ -8,6 +8,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../services/api_service.dart';
 import '../services/session.dart';
+import '../theme/brand_theme.dart';
 import '../utils/receipt_id_formatter.dart';
 import '../widgets/app_bottom_nav.dart';
 import 'dashboard_page.dart';
@@ -218,7 +219,7 @@ class _PaymentPageState extends State<PaymentPage> {
   }
 
   Future<Map<String, dynamic>?> _loadBackendReceipt(String paymentId) async {
-    final parsedPaymentId = _toInt(paymentId);
+    final parsedPaymentId = ReceiptIdFormatter.extractNumericId(paymentId);
     if (parsedPaymentId == null) {
       return null;
     }
@@ -234,6 +235,7 @@ class _PaymentPageState extends State<PaymentPage> {
 
     return response;
   }
+
 
   String _extractErrorMessage(
     Map<String, dynamic> error, {
@@ -529,7 +531,9 @@ class _PaymentPageState extends State<PaymentPage> {
           paidAt: now,
           isPaid: invoicePaid,
           canRecordPayment: isAdmin,
+          canPrintInvoice: isAdmin,
           onRecordPayment: _recordPaymentFromInvoice,
+
           onRefreshPaymentStatus: _refreshInvoicePreviewSnapshot,
           autoPrintWhenPaid: true,
         ),
@@ -594,7 +598,8 @@ class _PaymentPageState extends State<PaymentPage> {
       ],
     );
     final shortCode = _readScalarString(payload, ['shortCode']);
-    final paidStatus = refNo.isNotEmpty && _isPaidFromPayload(payload);
+    final paidStatus = _isPaidFromPayload(payload);
+
 
     setState(() {
       if (invoiceId.isNotEmpty) {
@@ -1023,10 +1028,12 @@ class _PaymentPageState extends State<PaymentPage> {
       payload['invoiceNumber'] = invoiceNumber;
     }
 
-    final generatedPaymentId = _toInt(previewPaymentId);
+    final generatedPaymentId =
+        ReceiptIdFormatter.extractNumericId(previewPaymentId);
     if (generatedPaymentId != null) {
       payload['paymentId'] = generatedPaymentId;
     }
+
 
     final referenceNumber = ReceiptIdFormatter.trimValue(previewBillNo ?? '');
     if (referenceNumber.isNotEmpty) {
@@ -1100,8 +1107,9 @@ class _PaymentPageState extends State<PaymentPage> {
         effectivePaymentId,
         provided: preferredShortCode,
       );
-            final paidStatus = result['success'] == true ||
-              (effectiveBillNo.isNotEmpty && _isPaidFromPayload(source));
+            final paidStatus =
+                result['success'] == true || _isPaidFromPayload(source);
+
 
       if (mounted) {
         setState(() {
@@ -1185,8 +1193,8 @@ class _PaymentPageState extends State<PaymentPage> {
       elevation: 0,
       color: Colors.white,
       shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(18),
-        side: const BorderSide(color: Color(0xFFE2E8F0)),
+        borderRadius: BorderRadius.circular(20),
+        side: const BorderSide(color: BrandColors.border),
       ),
       child: Padding(
         padding: const EdgeInsets.all(16),
@@ -1245,31 +1253,9 @@ class _PaymentPageState extends State<PaymentPage> {
         : ReceiptIdFormatter.displayPaymentId(previewPaymentId!);
 
     return Scaffold(
-      appBar: AppBar(
-        flexibleSpace: Container(
-          decoration: const BoxDecoration(
-            gradient: LinearGradient(
-              colors: [Color(0xFF0B57D0), Color(0xFF1E40AF)],
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-            ),
-          ),
-        ),
-        title: Row(
-          children: [
-            ClipRRect(
-              borderRadius: BorderRadius.circular(10),
-              child: Image.asset(
-                'assets/images/Logo.jpeg',
-                width: 28,
-                height: 28,
-                fit: BoxFit.cover,
-              ),
-            ),
-            const SizedBox(width: 10),
-            const Text('Collect Vehicle Tax'),
-          ],
-        ),
+      backgroundColor: BrandColors.background,
+      appBar: buildBrandAppBar(
+        title: 'Collect Vehicle Tax',
         actions: [
           if (vehicle != null || showRegister)
             IconButton(
@@ -1338,8 +1324,8 @@ class _PaymentPageState extends State<PaymentPage> {
                   paidTodayTime == null
                       ? 'This vehicle already has a payment recorded today.'
                       : 'This vehicle was already paid today at $paidTodayTime.',
-                  style: TextStyle(
-                    color: Colors.orange.shade900,
+                  style: const TextStyle(
+                    color: BrandColors.textPrimary,
                     fontWeight: FontWeight.w600,
                   ),
                 ),
@@ -1415,7 +1401,7 @@ class _PaymentPageState extends State<PaymentPage> {
                     const Text(
                       'Payment Details',
                       style:
-                          TextStyle(fontSize: 16, fontWeight: FontWeight.w600),
+                        TextStyle(fontSize: 17, fontWeight: FontWeight.w700),
                     ),
                     const SizedBox(height: 12),
                     _readOnlyField('Owner Name', ownerCtrl),
