@@ -290,30 +290,26 @@ class _DashboardPageState extends State<DashboardPage> {
     return null;
   }
 
+  /// "Full Name (@username)", so collectors who share a name can be told apart.
   String _collectorName(dynamic payment) {
     if (payment is! Map<String, dynamic>) return '-';
 
-    final direct = payment['collectorName'];
-    if (direct is String && direct.trim().isNotEmpty) {
-      return direct.trim();
-    }
+    String? text(dynamic v) =>
+        v is String && v.trim().isNotEmpty ? v.trim() : null;
 
     final collector = payment['collector'];
-    if (collector is String && collector.trim().isNotEmpty) {
-      return collector.trim();
-    }
-    if (collector is Map<String, dynamic>) {
-      final fullName = collector['fullName'];
-      if (fullName is String && fullName.trim().isNotEmpty) {
-        return fullName.trim();
-      }
-      final username = collector['username'];
-      if (username is String && username.trim().isNotEmpty) {
-        return username.trim();
-      }
+    String? name = text(payment['collectorName']);
+    String? username = text(payment['collectorUsername']);
+    if (collector is String) {
+      username ??= text(collector);
+    } else if (collector is Map<String, dynamic>) {
+      name ??= text(collector['fullName']);
+      username ??= text(collector['username']);
     }
 
-    return '-';
+    if (name == null) return username ?? '-';
+    if (username == null || username == name) return name;
+    return '$name (@$username)';
   }
 
   Future<void> loadDashboard() async {
